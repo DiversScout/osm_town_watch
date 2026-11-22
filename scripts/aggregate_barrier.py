@@ -4,12 +4,12 @@ import os
 import time
 import requests
 
-# 対象エリアのBBox (南, 西, 北, 東) ※北九州市〜関門エリア全域をカバー
-# 必要に応じて範囲を広げてください
+# 北九州市〜門司港・関門エリア全域 (南緯度, 西経度, 北緯度, 東経度)
 BBOX = "33.80,130.65,34.05,131.05"
 
 TILE_BASE_ZOOM = 16
 
+# 応答精度の高いエンドポイント順
 ENDPOINTS = [
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass-api.de/api/interpreter",
@@ -27,87 +27,60 @@ def lat_lng_to_tile(lat, lng, zoom):
 def is_registered(tags):
     if not tags:
         return False
-    # 縁石
-    if "barrier" in tags and tags["barrier"] == "kerb":
+    # 縁石 (kerb)
+    if tags.get("barrier") == "kerb" or "kerb" in tags:
         k = tags.get("kerb", "")
         if k and k != "unknown":
             return True
-    if "kerb" in tags and tags["kerb"] != "unknown":
-        return True
     # エレベーター
     if tags.get("highway") == "elevator":
         return True
     # 車椅子タグ
-    if "wheelchair" in tags and tags["wheelchair"] in ["yes", "limited", "no"]:
+    if tags.get("wheelchair") in ["yes", "limited", "no"]:
         return True
-    # トイレ
+    # 車椅子対応トイレ
     if tags.get("toilets:wheelchair") in ["yes", "limited", "no"]:
         return True
     return False
 
 def main():
+    # 座標(lat, lon)とtagsを確実に同時に返す標準クエリ
     query = f"""
-    [out:json][timeout:90];
+    [out:json][timeout:60];
     (
       node["barrier"="kerb"]({BBOX});
       node["kerb"]({BBOX});
-      node["highway"~"^(crossing|elevator)$"]({BBOX});
+      node["highway"="crossing"]({BBOX});
+      node["highway"="elevator"]({BBOX});
       node["shop"]({BBOX});
       node["amenity"]({BBOX});
       node["wheelchair"]({BBOX});
       node["toilets:wheelchair"]({BBOX});
     );
-    out skel qt;
-    out tags qt;
+    out body qt;
     """
 
     data = None
     for url in ENDPOINTS:
         try:
             print(f"Fetching from {url}...")
-            res = requests.post(url, data={"data": query}, timeout=120)
+            res = requests.post(
+                url,
+                data=f"data={query}".encode('utf-8'),
+                headers={"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"},
+                timeout=90
+            )
             if res.status_code == 200:
-                data = res.json()
-                print("Successfully fetched OSM data.")
-                break
+                text = res.text.strip()
+                if not text.startswith("<"):
+                    json_data = res.json()
+                    if "elements" in json_data and len(json_data["elements"]) > 0:
+                        data = json_data
+                        print(f"Successfully fetched {len(data['elements'])} elements from OSM.")
+                        break
         except Exception as e:
-            print(f"Failed: {e}")
+            print(f"Failed ({url}): {e}")
             time.sleep(2)
 
-    if not data or "elements" not in data:
-        raise RuntimeError("Failed to fetch data from all Overpass endpoints.")
-
-    tile_stats = {}
-
-    for item in data["elements"]:
-        lat = item.get("lat")
-        lon = item.get("lon")
-        if lat is None or lon is None:
-            continue
-
-        x, y = lat_lng_to_tile(lat, lon, TILE_BASE_ZOOM)
-        key = f"{x}_{y}"
-
-        if key not in tile_stats:
-            tile_stats[key] = {"total": 0, "tagged": 0}
-
-        tile_stats[key]["total"] += 1
-        if is_registered(item.get("tags", {})):
-            tile_stats[key]["tagged"] += 1
-
-    os.makedirs("data", exist_ok=True)
-    out_path = os.path.join("data", "tiles.json")
-
-    payload = {
-        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "base_zoom": TILE_BASE_ZOOM,
-        "tiles": tile_stats
-    }
-
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False)
-
-    print(f"Saved {len(tile_stats)} tiles to {out_path}")
-
-if __name__ == "__main__":
-    main()
+    if not data or "elements" not in data or len(data["elements"]) == 0:
+        raise RuntimeError("Failed to fetch valid OSM elements from all
