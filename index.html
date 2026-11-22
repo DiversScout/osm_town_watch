@@ -73,13 +73,6 @@
       height: 10px;
       border-radius: 50%;
     }
-    .legend-rect {
-      width: 10px;
-      height: 10px;
-      border-radius: 2px;
-      border: 1px dashed #64748b;
-      background: #cbd5e1;
-    }
 
     .btn-group {
       display: flex;
@@ -140,30 +133,6 @@
       line-height: 1.1;
     }
 
-    .poi-icon {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      width: 28px !important;
-      height: 28px !important;
-      font-size: 13px;
-      color: #ffffff;
-      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
-    }
-    .shape-registered {
-      border-radius: 50%;
-      border: 2px solid #ffffff;
-    }
-    .shape-unregistered {
-      border-radius: 6px;
-      border: 2px dashed #ffffff;
-      opacity: 0.85;
-    }
-    .color-passable { background-color: #16a34a; }
-    .color-limited  { background-color: #f59e0b; }
-    .color-blocked  { background-color: #dc2626; }
-    .color-unknown  { background-color: #64748b; }
-
     .current-loc-marker {
       width: 14px;
       height: 14px;
@@ -191,10 +160,10 @@
   </div>
 
   <div class="legend-row">
-    <div class="legend-item"><span class="legend-dot" style="background:#16a34a;"></span><span>可(丸)</span></div>
-    <div class="legend-item"><span class="legend-dot" style="background:#f59e0b;"></span><span>要介助</span></div>
-    <div class="legend-item"><span class="legend-dot" style="background:#dc2626;"></span><span>不可(段差)</span></div>
-    <div class="legend-item"><span class="legend-rect"></span><span>未調査(四角)</span></div>
+    <div class="legend-item"><span class="legend-dot" style="background:#10b981;"></span><span>75%以上</span></div>
+    <div class="legend-item"><span class="legend-dot" style="background:#84cc16;"></span><span>50%〜</span></div>
+    <div class="legend-item"><span class="legend-dot" style="background:#f59e0b;"></span><span>25%〜</span></div>
+    <div class="legend-item"><span class="legend-dot" style="background:#ef4444;"></span><span>25%未満</span></div>
   </div>
 
   <div class="btn-group">
@@ -208,30 +177,16 @@
   const HOME_COORDS = [33.9452, 130.9616];
   const DEFAULT_ZOOM = 18;
   const MAX_MAP_ZOOM = 19;
-  const MIN_HEATMAP_ZOOM = 15; // 広域ズームでは描画負荷を避けるため非表示
+  const MIN_HEATMAP_ZOOM = 15;
   const TILE_BASE_ZOOM = 16;
 
   const STORAGE_KEY_MAP_STATE = "osm_barrier_view_state";
 
-  const OVERPASS_ENDPOINTS = [
-    "https://overpass.kumi.systems/api/interpreter",
-    "https://overpass-api.de/api/interpreter",
-    "https://lz4.overpass-api.de/api/interpreter",
-    "https://overpass.private.coffee/api/interpreter",
-    "https://overpass.osm.ch/api/interpreter"
-  ];
-
   let map = null;
   let gridLayer = null;
-  let markersLayer = null;
   let currentLocationMarker = null;
 
-  // 全国集計データのストア
   let tileStatsStore = new Map();
-  let detailFeatureStore = new Map();
-  let isFetchingDetail = false;
-  let detailAbortController = null;
-  let debounceTimer = null;
 
   function updateStatus(text, bg = "#e2e8f0", fg = "#475569") {
     const el = document.getElementById('status-badge');
@@ -284,46 +239,32 @@
     }).addTo(map);
 
     gridLayer = L.layerGroup().addTo(map);
-    markersLayer = L.layerGroup().addTo(map);
 
     const onMapChange = () => {
       saveCurrentState();
-      renderLayers();
-      clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => {
-        if (map.getZoom() >= MAX_MAP_ZOOM) {
-          fetchDetailData();
-        }
-      }, 400);
+      renderFixedGridHeatmap();
     };
 
     map.on('zoomend', onMapChange);
     map.on('moveend', onMapChange);
 
-    document.getElementById('btn-reload').addEventListener('click', () => {
-      loadStaticTileData();
-      if (map.getZoom() >= MAX_MAP_ZOOM) fetchDetailData();
-    });
+    document.getElementById('btn-reload').addEventListener('click', () => loadStaticTileData());
     document.getElementById('btn-locate').addEventListener('click', () => requestGeolocation(true));
     document.getElementById('btn-home').addEventListener('click', () => {
       map.setView(HOME_COORDS, DEFAULT_ZOOM);
       saveCurrentState();
-      renderLayers();
+      renderFixedGridHeatmap();
     });
 
-    // 1. 全国タイル集計JSONのロード
     await loadStaticTileData();
 
-    // 2. 位置の初期化
     if (!isReload) {
       requestGeolocation(false);
-    } else if (initZoom >= MAX_MAP_ZOOM) {
-      fetchDetailData();
     }
   }
 
   async function loadStaticTileData() {
-    updateStatus("全国データ読込中...", "#dbeafe", "#1d4ed8");
+    updateStatus("静的データ読込中...", "#dbeafe", "#1d4ed8");
     try {
       const res = await fetch(`./data/tiles.json?t=${Date.now()}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -335,7 +276,7 @@
       }
 
       updateStatus(`正常 (${tileStatsStore.size.toLocaleString()}区画)`, "#dcfce7", "#15803d");
-      renderLayers();
+      renderFixedGridHeatmap();
     } catch (e) {
       console.warn("Static tiles fetch failed:", e);
       updateStatus("データ未生成/読込待機", "#fef3c7", "#b45309");
@@ -352,7 +293,7 @@
         setCurMarker(lat, lng);
         map.setView([lat, lng], DEFAULT_ZOOM);
         saveCurrentState();
-        renderLayers();
+        renderFixedGridHeatmap();
       },
       (err) => console.warn(err),
       { enableHighAccuracy: false, timeout: 5000, maximumAge: 60000 }
@@ -421,8 +362,8 @@
     gridLayer.clearLayers();
 
     const zoom = map.getZoom();
+    document.getElementById('zoom-info').innerText = `ズーム: ${zoom}`;
 
-    // 広域表示 (Zoom < 15) では描画負荷を完全に排するためスキップ
     if (zoom < MIN_HEATMAP_ZOOM) {
       document.getElementById('count-info').innerText = "広域表示中 (ズームインで詳細)";
       return;
@@ -483,146 +424,6 @@
     }
 
     document.getElementById('count-info').innerText = `付与済: ${screenTagged} / 候補: ${screenTotal}`;
-  }
-
-  function renderLayers() {
-    if (!map) return;
-    const zoom = map.getZoom();
-    document.getElementById('zoom-info').innerText = `ズーム: ${zoom}`;
-
-    renderFixedGridHeatmap();
-
-    markersLayer.clearLayers();
-    if (zoom >= MAX_MAP_ZOOM) {
-      const bounds = map.getBounds();
-      detailFeatureStore.forEach(el => {
-        if (bounds.contains([el.lat, el.lon])) {
-          createStyledMarker(el).addTo(markersLayer);
-        }
-      });
-    }
-  }
-
-  // Zoom 19用 詳細取得（その時だけ現在見ている数ブロックのみ局所問い合わせ）
-  async function fetchDetailData() {
-    if (isFetchingDetail) return;
-    isFetchingDetail = true;
-    updateStatus("地物詳細取得中...", "#dbeafe", "#1d4ed8");
-
-    if (detailAbortController) detailAbortController.abort();
-    detailAbortController = new AbortController();
-
-    const bbox = map.getBounds();
-    const s = bbox.getSouth(), w = bbox.getWest(), n = bbox.getNorth(), e = bbox.getEast();
-
-    const query = `[out:json][timeout:20];
-(
-  node["barrier"="kerb"](${s},${w},${n},${e});
-  node["kerb"](${s},${w},${n},${e});
-  node["highway"~"^(crossing|elevator)$"](${s},${w},${n},${e});
-  node["shop"](${s},${w},${n},${e});
-  node["amenity"](${s},${w},${n},${e});
-  node["wheelchair"](${s},${w},${n},${e});
-  node["toilets:wheelchair"](${s},${w},${n},${e});
-);
-out body;`;
-
-    let success = false;
-
-    for (const endpoint of OVERPASS_ENDPOINTS) {
-      try {
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
-          },
-          body: `data=${encodeURIComponent(query)}`,
-          signal: detailAbortController.signal
-        });
-
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const text = await res.text();
-        const trimmed = text.trim();
-        if (trimmed.startsWith('<')) throw new Error('XML/HTML応答');
-
-        const data = JSON.parse(trimmed);
-
-        if (data && Array.isArray(data.elements)) {
-          data.elements.forEach(item => {
-            if (item.lat && item.lon) {
-              detailFeatureStore.set(item.id, item);
-            }
-          });
-          success = true;
-          break;
-        }
-      } catch (err) {
-        if (err.name === 'AbortError') return;
-      }
-    }
-
-    isFetchingDetail = false;
-    updateStatus(`正常 (${tileStatsStore.size.toLocaleString()}区画)`, "#dcfce7", "#15803d");
-    renderLayers();
-  }
-
-  function evaluateAccessibility(tags = {}) {
-    if (tags.barrier === 'kerb' || tags.kerb) {
-      const k = tags.kerb || '';
-      if (k === 'flush' || k === 'lowered') return { isRegistered: true, passStatus: 'passable', type: 'kerb', desc: `段差解消縁石 (${k})` };
-      if (k === 'raised') return { isRegistered: true, passStatus: 'blocked', type: 'kerb', desc: `段差あり縁石 (raised)` };
-      if (k && k !== 'unknown') return { isRegistered: true, passStatus: 'limited', type: 'kerb', desc: `縁石 (${k})` };
-      return { isRegistered: false, passStatus: 'unknown', type: 'kerb', desc: `縁石 (段差未記録)` };
-    }
-    if (tags.highway === 'elevator') return { isRegistered: true, passStatus: 'passable', type: 'elevator', desc: 'エレベーター' };
-    if (tags.wheelchair) {
-      if (tags.wheelchair === 'yes') return { isRegistered: true, passStatus: 'passable', type: 'poi', desc: '車椅子利用可' };
-      if (tags.wheelchair === 'limited') return { isRegistered: true, passStatus: 'limited', type: 'poi', desc: '要介助/条件付' };
-      if (tags.wheelchair === 'no') return { isRegistered: true, passStatus: 'blocked', type: 'poi', desc: '利用不可' };
-    }
-    if (tags['toilets:wheelchair'] === 'yes') return { isRegistered: true, passStatus: 'passable', type: 'toilet', desc: '車椅子対応トイレ' };
-    if (tags.highway === 'crossing') return { isRegistered: false, passStatus: 'unknown', type: 'crossing', desc: '横断歩道 (未登録)' };
-    return { isRegistered: false, passStatus: 'unknown', type: 'poi', desc: `${tags.name || '施設/店舗'} (未登録)` };
-  }
-
-  function createStyledMarker(item) {
-    const tags = item.tags || {};
-    const evalResult = evaluateAccessibility(tags);
-
-    const shapeClass = evalResult.isRegistered ? 'shape-registered' : 'shape-unregistered';
-    let colorClass = 'color-unknown';
-    if (evalResult.passStatus === 'passable') colorClass = 'color-passable';
-    else if (evalResult.passStatus === 'limited') colorClass = 'color-limited';
-    else if (evalResult.passStatus === 'blocked') colorClass = 'color-blocked';
-
-    let iconChar = '♿';
-    if (evalResult.type === 'kerb') iconChar = '⤓';
-    else if (evalResult.type === 'elevator') iconChar = '🛗';
-    else if (evalResult.type === 'toilet') iconChar = '🚻';
-    else if (evalResult.type === 'crossing') iconChar = '🚶';
-    else if (!evalResult.isRegistered) iconChar = '❓';
-
-    const icon = L.divIcon({
-      className: `poi-icon ${shapeClass} ${colorClass}`,
-      html: iconChar,
-      iconSize: [28, 28],
-      iconAnchor: [14, 14],
-      popupAnchor: [0, -14]
-    });
-
-    const marker = L.marker([item.lat, item.lon], { icon });
-    let statusText = evalResult.isRegistered ? '【登録済み】' : '【未登録・要調査】';
-    let popup = `<strong>${tags.name || evalResult.desc}</strong><br>`;
-    popup += `<div style="font-size:11px; margin-top:3px; font-weight:700; color:${evalResult.passStatus === 'passable' ? '#16a34a' : evalResult.passStatus === 'blocked' ? '#dc2626' : '#b45309'};">${statusText} ${evalResult.desc}</div>`;
-    popup += `<div style="font-size:11px; margin-top:4px; max-height:120px; overflow-y:auto; border-top:1px solid #f1f5f9; padding-top:4px;">`;
-    popup += `<div style="color:#64748b;">OSM ID: ${item.id}</div>`;
-    for (const [k, v] of Object.entries(tags)) {
-      popup += `<div><span style="color:#64748b;">${k}:</span> ${v}</div>`;
-    }
-    popup += `</div>`;
-    marker.bindPopup(popup);
-
-    return marker;
   }
 
   if (document.readyState === 'loading') {
