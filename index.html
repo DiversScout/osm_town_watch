@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>バリアフリー情報可視化マップ</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- Leaflet CSS & JS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  
+  <!-- Leaflet.heat Plugin -->
+  <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <style>
+    /* Map container needs explicit height */
+    #map {
+      height: 100vh;
+      width: 100vw;
+      z-index: 10;
+    }
+    /* Custom pulsing marker for user location */
+    .user-location-pulse {
+      position: relative;
+      width: 20px;
+      height: 20px;
+      background: #3b82f6;
+      border: 3px solid white;
+      border-radius: 50%;
+      box-shadow: 0 0 10px rgba(0,0,0,0.3);
+    }
+    .user-location-pulse::after {
+      content: '';
+      position: absolute;
+      width: 40px;
+      height: 40px;
+      top: -13px;
+      left: -13px;
+      border-radius: 50%;
+      background: rgba(59, 130, 246, 0.4);
+      animation: pulse 1.8s infinite ease-out;
+    }
+    @keyframes pulse {
+      0% { transform: scale(0.5); opacity: 1; }
+      100% { transform: scale(1.5); opacity: 0; }
+    }
+    /* Hide scrollbars on modern panels */
+    .no-scrollbar::-webkit-scrollbar {
+      display: none;
+    }
+    .no-scrollbar {
+      -ms-overflow-style: none;
+      scrollbar-width: none;
+    }
+  </style>
+</head>
+<body class="bg-slate-900 text-slate-800 font-sans antialiased overflow-hidden select-none">
+
+  <!-- Map Display Container -->
+  <div id="map"></div>
+
+  <!-- Top Floating Header & Status Bar -->
+  <header class="absolute top-4 left-4 right-4 md:right-auto md:w-96 z-20 pointer-events-none">
+    <div class="bg-white/95 backdrop-blur-md shadow-xl rounded-2xl p-4 border border-slate-200 pointer-events-auto transition-all">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <div class="p-2 bg-indigo-600 text-white rounded-xl shadow-md">
+            <i data-lucide="accessibility" class="w-5 h-5"></i>
+          </div>
+          <div>
+            <h1 class="text-base font-bold text-slate-900 tracking-tight leading-tight">バリアフリー可視化マップ</h1>
+            <p class="text-xs text-slate-500 font-medium">門司港駅 & 周辺エリア</p>
+          </div>
+        </div>
+        <!-- Mode Badge -->
+        <div id="mode-badge" class="px-2.5 py-1 text-xs font-semibold rounded-full bg-amber-100 text-amber-800 border border-amber-300 flex items-center gap-1 shadow-sm">
+          <span class="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></span>
+          <span>ヒートマップ</span>
+        </div>
+      </div>
+
+      <!-- Live Zoom Level & Info -->
+      <div class="mt-3 pt-2.5 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600 font-medium">
+        <div class="flex items-center gap-1.5">
+          <i data-lucide="zoom-in" class="w-4 h-4 text-slate-400"></i>
+          <span>Zoom: <span id="current-zoom" class="font-bold text-slate-800">14</span></span>
+        </div>
+        <div class="flex items-center gap-1.5">
+          <i data-lucide="map-pin" class="w-4 h-4 text-slate-400"></i>
+          <span>登録地物: <span id="item-count" class="font-bold text-indigo-600">0</span> 件</span>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Filter & Controls Toolbar (Floating Bottom or Right) -->
+  <div class="absolute bottom-6 left-4 right-4 md:left-auto md:right-6 md:w-80 z-20 pointer-events-none flex flex-col gap-3">
+    
+    <!-- Filter Card -->
+    <div class="bg-white/95 backdrop-blur-md rounded-2xl shadow-xl p-4 border border-slate-200 pointer-events-auto transition-all">
+      <div class="flex items-center justify-between mb-2.5">
+        <span class="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
+          <i data-lucide="sliders-horizontal" class="w-3.5 h-3.5 text-indigo-600"></i> 表示フィルタ
+        </span>
+        <button id="reload-btn" title="表示範囲のデータをOverpass APIで再取得" class="text-xs text-indigo-600 hover:text-indigo-800 font-semibold flex items-center gap-1 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-lg transition-colors">
+          <i data-lucide="refresh-cw" class="w-3.5 h-3.5" id="reload-icon"></i> エリア再取得
+        </button>
+      </div>
+
+      <!-- Categories Checkboxes -->
+      <div class="grid grid-cols-2 gap-2 text-xs font-medium">
+        <label class="flex items-center gap-2 p-2 rounded-xl bg-slate-50 border border-slate-200/80 cursor-pointer hover:bg-slate-100 transition-colors">
+          <input type="checkbox" id="filter-wheelchair" checked class="w-4 h-4 text-indigo-600 rounded accent-indigo-600">
+          <span class="text-slate-700">♿ 車椅子対応</span>
+        </label>
+        <label class="flex items-center gap-2 p-2 rounded-xl bg-slate-50 border border-slate-200/80 cursor-pointer hover:bg-slate-100 transition-colors">
+          <input type="checkbox" id="filter-elevator" checked class="w-4 h-4 text-indigo-600 rounded accent-indigo-600">
+          <span class="text-slate-700">🛗 エレベーター</span>
+        </label>
+        <label class="flex items-center gap-2 p-2 rounded-xl bg-slate-50 border border-slate-200/80 cursor-pointer hover:bg-slate-100 transition-colors">
+          <input type="checkbox" id="filter-toilet" checked class="w-4 h-4 text-indigo-600 rounded accent-indigo-600">
+          <span class="text-slate-700">🚻 多機能トイレ</span>
+        </label>
+        <label class="flex items-center gap-2 p-2 rounded-xl bg-slate-50 border border-slate-200/80 cursor-pointer hover:bg-slate-100 transition-colors">
+          <input type="checkbox" id="filter-ramp" checked class="w-4 h-4 text-indigo-600 rounded accent-indigo-600">
+          <span class="text-slate-700">📐 スロープ/歩道</span>
+        </label>
+      </div>
+
+      <!-- Heatmap/Feature Guide Hint -->
+      <div class="mt-3 p-2 bg-slate-50 rounded-xl text-[11px] text-slate-500 leading-relaxed flex items-start gap-1.5 border border-slate-100">
+        <i data-lucide="info" class="w-4 h-4 text-indigo-500 shrink-0 mt-0.5"></i>
+        <span>ズーム16未満でヒートマップ表示、16以上でアイコンを個別に強調表示します。</span>
+      </div>
+    </div>
+
+    <!-- Quick Action Bar -->
+    <div class="flex items-center justify-between gap-2 pointer-events-auto">
+      <button id="btn-mojiko" class="flex-1 bg-white/95 backdrop-blur-md border border-slate-200 hover:bg-slate-100 text-slate-700 font-bold py-2.5 px-3 rounded-2xl shadow-lg text-xs flex items-center justify-center gap-1.5 transition-all active:scale-95">
+        <i data-lucide="anchor" class="w-4 h-4 text-indigo-600"></i> 門司港駅へ
+      </button>
+      <button id="btn-geolocation" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 px-3 rounded-2xl shadow-lg shadow-indigo-600/30 text-xs flex items-center justify-center gap-1.5 transition-all active:scale-95">
+        <i data-lucide="locate-fixed" class="w-4 h-4"></i> 現在地へ移動
+      </button>
+    </div>
+  </div>
+
+  <!-- Loading Overlay for API fetch -->
+  <div id="loading-spinner" class="absolute inset-0 bg-slate-900/30 backdrop-blur-sm z-30 flex items-center justify-center hidden pointer-events-auto">
+    <div class="bg-white px-5 py-4 rounded-2xl shadow-2xl flex items-center gap-3 text-slate-800 text-sm font-semibold">
+      <svg class="animate-spin h-5 w-5 text-indigo-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+      </svg>
+      <span>バリアフリー情報を取得中...</span>
+    </div>
+  </div>
+
+  <script>
+    // Lucide Icons initialization
+    lucide.createIcons();
+
+    // Default Coordinates (Mojiko Station: 北緯33.9452, 東経130.9616)
+    const MOJIKO_COORDS = [33.9452, 130.9616];
+    const DEFAULT_ZOOM = 15;
+    const HIGH_RES_ZOOM_THRESHOLD = 16;
+
+    // Map & Layers State
+    let map;
+    let heatLayer = null;
+    let markersLayer = L.layerGroup();
+    let userMarker = null;
+
+    // Cached raw barrier-free items
+    let barrierItems = [];
+
+    // Filter status
+    const activeFilters = {
+      wheelchair: true,
+      elevator: true,
+      toilet: true,
+      ramp: true
+    };
+
+    /**
+     * Initial Seed Data: Mojiko Station area pre-loaded points
+     * (Provides instant visualization before any API request)
+     */
+    const seedDataMojiko = [
+      // 門司港駅構内・周辺
+      { lat: 33.9452, lng: 130.9616, name: "JR門司港駅改札口", type: "wheelchair", details: "車椅子対応改札・段差解消済み", wheelchair: "yes" },
+      { lat: 33.9453, lng: 130.9618, name: "門司港駅構内エレベーター", type: "elevator", details: "ホーム〜コンコース直結", wheelchair: "yes" },
+      { lat: 33.9451, lng: 130.9614, name: "門司港駅 多機能トイレ", type: "toilet", details: "オストメイト対応・車椅子旋回スペースあり", wheelchair: "yes" },
+      { lat: 33.9448, lng: 130.9620, name: "駅前広場スロープ", type: "ramp", details: "緩やかなスロープ・手すり完備", wheelchair: "yes" },
+      { lat: 33.9460, lng: 130.9625, name: "九州鉄道記念館 入口", type: "wheelchair", details: "完全バリアフリー入口", wheelchair: "yes" },
+      { lat: 33.9462, lng: 130.9630, name: "九州鉄道記念館 多目的トイレ", type: "toilet", details: "バリアフリー対応", wheelchair: "yes" },
+      { lat: 33.9470, lng: 130.9635, name: "門司港レトロ観光物産館", type: "wheelchair", details: "段差なし出入口", wheelchair: "yes" },
+      { lat: 33.9482, lng: 130.9642, name: "旧門司税関", type: "wheelchair", details: "スロープ設置済み", wheelchair: "yes" },
+      { lat: 33.9485, lng: 130.9640, name: "旧門司税関 多機能トイレ", type: "toilet", details: "車椅子対応", wheelchair: "yes" },
+      { lat: 33.9475, lng: 130.9610, name: "海峡プラザ エレベーター", type: "elevator", details: "2階ショッピングフロア連絡", wheelchair: "yes" },
+      { lat: 33.9472, lng: 130.9608, name: "海峡プラザ 多目的トイレ", type: "toilet", details: "ベビーキープ・オストメイト対応", wheelchair: "yes" },
+      { lat: 33.9468, lng: 130.9605, name: "親水広場スロープ", type: "ramp", details: "海沿いプロムナードへの段差解消", wheelchair: "yes" },
+      { lat: 33.9490, lng: 130.9650, name: "門司港レトロ展望室 エレベーター", type: "elevator", details: "31階直通高速エレベーター", wheelchair: "yes" },
+      { lat: 33.9493, lng: 130.9652, name: "レトロハイマート 多機能トイレ", type: "toilet", details: "展望室フロア", wheelchair: "yes" },
+      { lat: 33.9442, lng: 130.9600, name: "門司港桟橋スロープ", type: "ramp", details: "関門連絡船のりば連絡スロープ", wheelchair: "yes" },
+      { lat: 33.9440, lng: 130.9595, name: "門司港連絡船待合所", type: "wheelchair", details: "フラット入場可能", wheelchair: "yes" },
+      { lat: 33.9458, lng: 130.9645, name: "中央通歩道スロープ", type: "ramp", details: "視覚障害者用誘導ブロック併設", wheelchair: "yes" },
+      { lat: 33.9435, lng: 130.9625, name: "栄町銀天街入口スロープ", type: "ramp", details: "アーケード街平坦路", wheelchair: "yes" },
+      { lat: 33.9430, lng: 130.9630, name: "市民会館 多目的トイレ", type: "toilet", details: "1Fロビー設置", wheelchair: "yes" }
+    ];
+
+    /**
+     * Initialize Leaflet Map
+     */
+    function initMap() {
+      // Map instance
+      map = L.map('map', {
+        center: MOJIKO_COORDS,
+        zoom: DEFAULT_ZOOM,
+        zoomControl: false // custom position
+      });
+
+      // Reposition Zoom Control to bottom-left on desktop/mobile
+      L.control.zoom({ position: 'topright' }).addTo(map);
+
+      // OpenStreetMap Base Tiles with carto light style for clean contrast
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
+        subdomains: 'abcd',
+        maxZoom: 19
+      }).addTo(map);
+
+      markersLayer.addTo(map);
+
+      // Populate Initial Data
+      barrierItems = [...seedDataMojiko];
+      renderLayers();
+
+      // Setup Map Listeners
+      map.on('zoomend', () => {
+        updateZoomDisplay();
+        renderLayers();
+      });
+
+      // Trigger automatic Geolocation attempt
+      detectUserLocation();
+    }
+
+    /**
+     * Determine user category based on attributes
+     */
+    function categorizeNode(tags) {
+      if (!tags) return 'wheelchair';
+      if (tags.highway === 'elevator' || tags.elevator === 'yes') return 'elevator';
+      if (tags['toilets:wheelchair'] === 'yes' || tags.amenity === 'toilets') return 'toilet';
+      if (tags.highway === 'steps' || tags.incline || tags.ramp === 'yes') return 'ramp';
+      if (tags.wheelchair === 'yes' || tags.wheelchair === 'designated' || tags.wheelchair === 'limited') return 'wheelchair';
+      return 'wheelchair';
+    }
+
+    /**
+     * Fetch barrier-free features from Overpass API based on map bounds
+     */
+    async function fetchOverpassData() {
+      const bounds = map.getBounds();
+      const south = bounds.getSouth();
+      const west = bounds.getWest();
+      const north = bounds.getNorth();
+      const east = bounds.getEast();
+
+      // Show loader
+      const spinner = document.getElementById('loading-spinner');
+      const reloadIcon = document.getElementById('reload-icon');
+      spinner.classList.remove('hidden');
+      reloadIcon.classList.add('animate-spin');
+
+      // Overpass QL Query for wheelchair accessible nodes, elevators, accessible toilets, ramps
+      const query = `
+        [out:json][timeout:20];
+        (
+          node["wheelchair"="yes"](${south},${west},${north},${east});
+          node["wheelchair"="designated"](${south},${west},${north},${east});
+          node["highway"="elevator"](${south},${west},${north},${east});
+          node["toilets:wheelchair"="yes"](${south},${west},${north},${east});
+          node["ramp"="yes"](${south},${west},${north},${east});
+        );
+        out body 150;
+      `;
+
+      try {
+        const response = await fetch('https://overpass-api.de/api/interpreter', {
+          method: 'POST',
+          body: `data=${encodeURIComponent(query)}`
+        });
+
+        if (!response.ok) throw new Error('Overpass API通信エラー');
+
+        const data = await response.json();
+        
+        if (data && data.elements && data.elements.length > 0) {
+          const fetchedItems = data.elements.map(el => {
+            const tags = el.tags || {};
+            const type = categorizeNode(tags);
+            const name = tags.name || tags.description || getDefaultName(type);
+            
+            return {
+              lat: el.lat,
+              lng: el.lon,
+              name: name,
+              type: type,
+              details: tags.description || `Wheelchair: ${tags.wheelchair || '対応'}, 種別: ${type}`,
+              wheelchair: tags.wheelchair || 'yes'
+            };
+          });
+
+          // Deduplicate and combine with existing
+          const keySet = new Set(barrierItems.map(i => `${i.lat.toFixed(5)},${i.lng.toFixed(5)}`));
+          fetchedItems.forEach(item => {
+            const key = `${item.lat.toFixed(5)},${item.lng.toFixed(5)}`;
+            if (!keySet.has(key)) {
+              barrierItems.push(item);
+              keySet.add(key);
+            }
+          });
+        }
+      } catch (err) {
+        console.warn('Overpass fetch failed or empty:', err);
+      } finally {
+        spinner.classList.add('hidden');
+        reloadIcon.classList.remove('animate-spin');
+        renderLayers();
+      }
+    }
+
+    function getDefaultName(type) {
+      switch (type) {
+        case 'elevator': return 'エレベーター';
+        case 'toilet': return '多機能・車椅子トイレ';
+        case 'ramp': return 'スロープ / 段差解消路';
+        default: return 'バリアフリー対応施設';
+      }
+    }
+
+    /**
+     * Render either Heatmap or High-resolution Individual Markers
+     */
+    function renderLayers() {
+      const currentZoom = map.getZoom();
+      const isHighRes = currentZoom >= HIGH_RES_ZOOM_THRESHOLD;
+      const modeBadge = document.getElementById('mode-badge');
+
+      // Filtered items
+      const visibleItems = barrierItems.filter(item => activeFilters[item.type]);
+      document.getElementById('item-count').textContent = visibleItems.length;
+
+      // Update UI Mode Badge
+      if (isHighRes) {
+        modeBadge.className = "px-2.5 py-1 text-xs font-semibold rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300 flex items-center gap-1 shadow-sm";
+        modeBadge.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span><span>詳細地物表示中</span>`;
+      } else {
+        modeBadge.className = "px-2.5 py-1 text-xs font-semibold rounded-full bg-amber-100 text-amber-800 border border-amber-300 flex items-center gap-1 shadow-sm";
+        modeBadge.innerHTML = `<span class="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></span><span>ヒートマップ表示中</span>`;
+      }
+
+      if (isHighRes) {
+        // High-resolution: Remove heat layer, add distinct markers
+        if (heatLayer) {
+          map.removeLayer(heatLayer);
+          heatLayer = null;
+        }
+        renderIndividualMarkers(visibleItems);
+      } else {
+        // Low/mid resolution: Remove markers, show heat density
+        markersLayer.clearLayers();
+        renderHeatmap(visibleItems);
+      }
+    }
+
+    /**
+     * Render Heatmap Layer
+     */
+    function renderHeatmap(items) {
+      const heatPoints = items.map(i => [i.lat, i.lng, 0.8]); // [lat, lng, intensity]
+
+      if (heatLayer) {
+        heatLayer.setLatLngs(heatPoints);
+      } else {
+        heatLayer = L.heatLayer(heatPoints, {
+          radius: 35,
+          blur: 20,
+          maxZoom: 16,
+          max: 1.0,
+          gradient: {
+            0.2: '#3b82f6', // blue
+            0.4: '#10b981', // green
+            0.6: '#fbbf24', // yellow
+            0.8: '#f97316', // orange
+            1.0: '#ef4444'  // red (high density)
+          }
+        }).addTo(map);
+      }
+    }
+
+    /**
+     * Render Highlighted Markers with SVG Badges
+     */
+    function renderIndividualMarkers(items) {
+      markersLayer.clearLayers();
+
+      items.forEach(item => {
+        const iconConfig = getIconConfig(item.type);
+
+        const customIcon = L.divIcon({
+          className: 'custom-pin',
+          html: `
+            <div class="group relative flex items-center justify-center transform hover:scale-125 transition-transform duration-200">
+              <div class="w-9 h-9 rounded-2xl ${iconConfig.bg} text-white shadow-lg border-2 border-white flex items-center justify-center">
+                <span class="text-sm">${iconConfig.symbol}</span>
+              </div>
+              <div class="w-2 h-2 bg-slate-800 rotate-45 absolute -bottom-1"></div>
+            </div>
+          `,
+          iconSize: [36, 36],
+          iconAnchor: [18, 36],
+          popupAnchor: [0, -36]
+        });
+
+        const popupContent = `
+          <div class="p-1 min-w-[190px]">
+            <div class="flex items-center gap-1.5 mb-1.5">
+              <span class="px-2 py-0.5 rounded-md text-[11px] font-bold ${iconConfig.tagBg} ${iconConfig.tagColor}">
+                ${iconConfig.label}
+              </span>
+            </div>
+            <h3 class="font-bold text-slate-800 text-sm leading-tight">${item.name}</h3>
+            <p class="text-xs text-slate-600 mt-1">${item.details}</p>
+            <div class="mt-2 pt-2 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500">
+              <span>車椅子対応</span>
+              <span class="font-bold text-emerald-600">利用可能</span>
+            </div>
+          </div>
+        `;
+
+        const marker = L.marker([item.lat, item.lng], { icon: customIcon });
+        marker.bindPopup(popupContent, { className: 'custom-leaflet-popup' });
+        markersLayer.addLayer(marker);
+      });
+    }
+
+    function getIconConfig(type) {
+      switch (type) {
+        case 'elevator':
+          return { bg: 'bg-amber-500', symbol: '🛗', label: 'エレベーター', tagBg: 'bg-amber-50', tagColor: 'text-amber-700' };
+        case 'toilet':
+          return { bg: 'bg-sky-500', symbol: '🚻', label: '多機能トイレ', tagBg: 'bg-sky-50', tagColor: 'text-sky-700' };
+        case 'ramp':
+          return { bg: 'bg-emerald-500', symbol: '📐', label: 'スロープ/平坦路', tagBg: 'bg-emerald-50', tagColor: 'text-emerald-700' };
+        default:
+          return { bg: 'bg-indigo-600', symbol: '♿', label: '車椅子対応設備', tagBg: 'bg-indigo-50', tagColor: 'text-indigo-700' };
+      }
+    }
+
+    function updateZoomDisplay() {
+      const z = map.getZoom();
+      document.getElementById('current-zoom').textContent = z;
+    }
+
+    /**
+     * HTML5 Geolocation API with graceful fallback to Mojiko Station
+     */
+    function detectUserLocation() {
+      if ('geolocation' in navigator) {
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            const userLat = pos.coords.latitude;
+            const userLng = pos.coords.longitude;
+            
+            // Pan to current position smoothly
+            map.flyTo([userLat, userLng], 15, { duration: 1.5 });
+
+            // Place pulsing user marker
+            if (userMarker) {
+              userMarker.setLatLng([userLat, userLng]);
+            } else {
+              const pulseIcon = L.divIcon({
+                className: '',
+                html: '<div class="user-location-pulse"></div>',
+                iconSize: [20, 20],
+                iconAnchor: [10, 10]
+              });
+              userMarker = L.marker([userLat, userLng], { icon: pulseIcon }).addTo(map);
+              userMarker.bindPopup('<b class="text-xs">現在地</b>');
+            }
+
+            // Once centered on user, trigger live API data fetch for their area
+            setTimeout(() => {
+              fetchOverpassData();
+            }, 800);
+          },
+          (err) => {
+            console.log('現在地取得未許可または失敗。デフォルトの門司港駅を使用します:', err.message);
+            // Default stays on Mojiko Station smoothly
+          },
+          { enableHighAccuracy: true, timeout: 6000, maximumAge: 60000 }
+        );
+      }
+    }
+
+    // Set up UI Event Handlers
+    window.addEventListener('DOMContentLoaded', () => {
+      initMap();
+
+      // Filter toggles
+      document.getElementById('filter-wheelchair').addEventListener('change', (e) => {
+        activeFilters.wheelchair = e.target.checked;
+        renderLayers();
+      });
+      document.getElementById('filter-elevator').addEventListener('change', (e) => {
+        activeFilters.elevator = e.target.checked;
+        renderLayers();
+      });
+      document.getElementById('filter-toilet').addEventListener('change', (e) => {
+        activeFilters.toilet = e.target.checked;
+        renderLayers();
+      });
+      document.getElementById('filter-ramp').addEventListener('change', (e) => {
+        activeFilters.ramp = e.target.checked;
+        renderLayers();
+      });
+
+      // Quick Nav Buttons
+      document.getElementById('btn-mojiko').addEventListener('click', () => {
+        map.flyTo(MOJIKO_COORDS, 15, { duration: 1.2 });
+      });
+
+      document.getElementById('btn-geolocation').addEventListener('click', () => {
+        detectUserLocation();
+      });
+
+      document.getElementById('reload-btn').addEventListener('click', () => {
+        fetchOverpassData();
+      });
+    });
+  </script>
+</body>
+</html>
