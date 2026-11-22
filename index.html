@@ -136,12 +136,25 @@
   const MOJIKO_COORDS = [33.9452, 130.9616];
   const SWITCH_ZOOM = 16;
 
-  // Overpass API エンドポイント（冗長化）
+  // 応答性の高いエンドポイント順（private.coffee / kumi を上位配置）
   const OVERPASS_ENDPOINTS = [
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
     "https://overpass-api.de/api/interpreter",
     "https://lz4.overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.osm.ch/api/interpreter"
+  ];
+
+  // 万一のAPIダウン時にもヒートマップを表示する門司港駅周辺の初期シードデータ
+  const MOJIKO_SEED_DATA = [
+    { id: 'seed-1', lat: 33.9452, lon: 130.9616, tags: { name: "門司港駅", wheelchair: "yes" } },
+    { id: 'seed-2', lat: 33.9455, lon: 130.9620, tags: { amenity: "toilets", "toilets:wheelchair": "yes" } },
+    { id: 'seed-3', lat: 33.9448, lon: 130.9612, tags: { highway: "elevator" } },
+    { id: 'seed-4', lat: 33.9460, lon: 130.9635, tags: { name: "旧門司税関", wheelchair: "yes" } },
+    { id: 'seed-5', lat: 33.9468, lon: 130.9650, tags: { name: "門司港レトロ展望室", wheelchair: "yes", highway: "elevator" } },
+    { id: 'seed-6', lat: 33.9472, lon: 130.9658, tags: { barrier: "kerb", kerb: "lowered" } },
+    { id: 'seed-7', lat: 33.9442, lon: 130.9605, tags: { barrier: "kerb", kerb: "lowered" } },
+    { id: 'seed-8', lat: 33.9438, lon: 130.9598, tags: { amenity: "toilets", "toilets:wheelchair": "yes" } }
   ];
 
   let map = null;
@@ -176,10 +189,14 @@
 
     markersLayer = L.layerGroup().addTo(map);
 
+    // シードデータを事前投入（API取得前またはエラー時でもヒートマップを描画可能にする）
+    MOJIKO_SEED_DATA.forEach(d => featureStore.set(d.id, d));
+    renderLayers();
+
     map.on('zoomend', renderLayers);
     map.on('moveend', renderLayers);
 
-    // ボタンのイベントバインド（インライン onclick 廃止で参照エラーを回避）
+    // UIボタンイベント
     document.getElementById('btn-reload').addEventListener('click', () => fetchOverpassData());
     document.getElementById('btn-locate').addEventListener('click', () => requestGeolocation(true));
     document.getElementById('btn-mojiko').addEventListener('click', () => {
@@ -187,16 +204,14 @@
       fetchOverpassData();
     });
 
-    // 初回現在地判定
+    // 位置情報判定（※API fetchはここを起点に1回だけ実行）
     requestGeolocation(false);
-
-    // 初回データ取得
-    fetchOverpassData();
   }
 
   function requestGeolocation(moveTo = false) {
     if (!navigator.geolocation) {
       updateStatus("門司港駅 (標準)", "#e2e8f0", "#475569");
+      fetchOverpassData();
       return;
     }
 
@@ -207,7 +222,6 @@
         const lat = pos.coords.latitude;
         const lng = pos.coords.longitude;
         setCurMarker(lat, lng);
-
         map.setView([lat, lng], 16);
         updateStatus("現在地表示中", "#dcfce7", "#15803d");
         fetchOverpassData();
@@ -215,8 +229,9 @@
       (err) => {
         console.warn(`Geolocation error: ${err.message}`);
         updateStatus("門司港駅 (標準)", "#e2e8f0", "#475569");
+        fetchOverpassData();
       },
-      { enableHighAccuracy: false, timeout: 5000, maximumAge: 60000 }
+      { enableHighAccuracy: false, timeout: 6000, maximumAge: 60000 }
     );
   }
 
@@ -262,32 +277,33 @@
 
     for (const endpoint of OVERPASS_ENDPOINTS) {
       try {
+        // クライアント側タイムアウトをサーバー制限に合わせて25秒に設定
         const res = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: `data=${encodeURIComponent(query)}`,
-          signal: AbortSignal.timeout(10000)
+          signal: AbortSignal.timeout(25000)
         });
 
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
 
-        if (data && data.elements) {
+        if (data && data.elements && data.elements.length > 0) {
           data.elements.forEach(item => {
             if (item.lat && item.lon) {
               featureStore.set(item.id, item);
             }
           });
+          success = true;
+          break;
         }
-        success = true;
-        break;
       } catch (err) {
         console.warn(`Fallback triggered: ${endpoint} failed.`, err.message);
       }
     }
 
     isFetching = false;
-    updateStatus(success ? "正常" : "取得失敗(再試行推奨)", success ? "#dcfce7" : "#fee2e2", success ? "#15803d" : "#b91c1c");
+    updateStatus(success ? "正常" : "Overpass混雑中(シード表示)", success ? "#dcfce7" : "#fef3c7", success ? "#15803d" : "#b45309");
     renderLayers();
   }
 
@@ -303,13 +319,14 @@
     if (zoom < SWITCH_ZOOM) {
       if (markersLayer) markersLayer.clearLayers();
 
-      const heatPoints = elements.map(el => [el.lat, el.lon, 0.8]);
+      const heatPoints = elements.map(el => [el.lat, el.lon, 1.0]);
+
       if (heatLayer) {
         heatLayer.setLatLngs(heatPoints);
       } else if (typeof L.heatLayer === 'function') {
         heatLayer = L.heatLayer(heatPoints, {
-          radius: 25,
-          blur: 15,
+          radius: 30,
+          blur: 18,
           maxZoom: 15,
           gradient: { 0.2: '#0284c7', 0.5: '#10b981', 0.8: '#f59e0b', 1.0: '#ef4444' }
         }).addTo(map);
@@ -373,7 +390,7 @@
     return marker;
   }
 
-  // DOMロード完了後に初期化
+  // 初期化実行
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initMap);
   } else {
