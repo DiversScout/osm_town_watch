@@ -155,8 +155,6 @@
       box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
       transition: transform 0.1s;
     }
-
-    /* 【形状】登録状況による区分 */
     .shape-registered {
       border-radius: 50%;
       border: 2px solid #ffffff;
@@ -166,8 +164,6 @@
       border: 2px dashed #ffffff;
       opacity: 0.85;
     }
-
-    /* 【色】通行可否による区分 */
     .color-passable { background-color: #16a34a; }
     .color-limited  { background-color: #f59e0b; }
     .color-blocked  { background-color: #dc2626; }
@@ -211,12 +207,13 @@
   <div class="btn-group">
     <button class="btn btn-primary" id="btn-reload">エリア再取得</button>
     <button class="btn" id="btn-locate">現在地へ移動</button>
-    <button class="btn" id="btn-mojiko">門司港駅へ</button>
+    <button class="btn" id="btn-home">ホームへ</button>
   </div>
 </div>
 
 <script>
-  const MOJIKO_COORDS = [33.9452, 130.9616];
+  // ホーム座標（門司港駅）
+  const HOME_COORDS = [33.9452, 130.9616];
   const DEFAULT_ZOOM = 18;
   const MAX_MAP_ZOOM = 19;
   const TILE_BASE_ZOOM = 16; // 固定グリッド基準ズーム
@@ -236,9 +233,10 @@
   let markersLayer = null;
   let currentLocationMarker = null;
 
-  // キャッシュストア
-  let featureStore = new Map(); // id -> feature
-  let tileStatsStore = new Map(); // "x_y" -> { total: 0, tagged: 0 } 固定タイルの普遍集計値
+  // キャッシュ
+  let detailFeatureStore = new Map();  // id -> feature (Zoom 19用)
+  let tileStatsStore = new Map();      // "x_y" -> { total: 0, tagged: 0 } (Zoom 16固定タイル集計値)
+  let fetchedTilesSet = new Set();     // 取得済みタイルキーの記録
 
   let isFetching = false;
   let abortController = null;
@@ -278,7 +276,7 @@
     const savedState = getSavedState();
     const isReload = !!savedState;
 
-    const initCenter = isReload ? [savedState.lat, savedState.lng] : MOJIKO_COORDS;
+    const initCenter = isReload ? [savedState.lat, savedState.lng] : HOME_COORDS;
     const initZoom = isReload ? (savedState.zoom || DEFAULT_ZOOM) : DEFAULT_ZOOM;
 
     map = L.map('map', {
@@ -298,26 +296,27 @@
     gridLayer = L.layerGroup().addTo(map);
     markersLayer = L.layerGroup().addTo(map);
 
+    // 画面操作時に更新
     map.on('zoomend', () => {
       saveCurrentState();
-      renderLayers();
+      handleMapChange();
     });
     map.on('moveend', () => {
       saveCurrentState();
-      renderLayers();
+      handleMapChange();
     });
 
-    document.getElementById('btn-reload').addEventListener('click', () => fetchOverpassData());
+    document.getElementById('btn-reload').addEventListener('click', () => fetchAppropriateData(true));
     document.getElementById('btn-locate').addEventListener('click', () => requestGeolocation(true));
-    document.getElementById('btn-mojiko').addEventListener('click', () => {
-      map.setView(MOJIKO_COORDS, DEFAULT_ZOOM);
+    document.getElementById('btn-home').addEventListener('click', () => {
+      map.setView(HOME_COORDS, DEFAULT_ZOOM);
       saveCurrentState();
-      fetchOverpassData();
+      fetchAppropriateData();
     });
 
     if (isReload) {
       updateStatus("リロード復元", "#e0e7ff", "#3730a3");
-      fetchOverpassData();
+      fetchAppropriateData();
     } else {
       requestGeolocation(false);
     }
@@ -325,8 +324,8 @@
 
   function requestGeolocation(moveTo = false) {
     if (!navigator.geolocation) {
-      updateStatus("門司港駅 (標準)", "#e2e8f0", "#475569");
-      fetchOverpassData();
+      updateStatus("ホーム (標準)", "#e2e8f0", "#475569");
+      fetchAppropriateData();
       return;
     }
 
@@ -340,12 +339,12 @@
         map.setView([lat, lng], DEFAULT_ZOOM);
         saveCurrentState();
         updateStatus("現在地表示中", "#dcfce7", "#15803d");
-        fetchOverpassData();
+        fetchAppropriateData();
       },
       (err) => {
         console.warn(`Geolocation: ${err.message}`);
-        updateStatus("門司港駅 (標準)", "#e2e8f0", "#475569");
-        fetchOverpassData();
+        updateStatus("ホーム (標準)", "#e2e8f0", "#475569");
+        fetchAppropriateData();
       },
       { enableHighAccuracy: false, timeout: 5000, maximumAge: 60000 }
     );
@@ -362,74 +361,6 @@
       });
       currentLocationMarker = L.marker([lat, lng], { icon }).addTo(map);
     }
-  }
-
-  function buildQuery(bbox) {
-    const s = bbox.getSouth();
-    const w = bbox.getWest();
-    const n = bbox.getNorth();
-    const e = bbox.getEast();
-
-    return `[out:json][timeout:15];
-(
-  node["barrier"="kerb"](${s},${w},${n},${e});
-  node["kerb"](${s},${w},${n},${e});
-  node["highway"="crossing"](${s},${w},${n},${e});
-  node["highway"="elevator"](${s},${w},${n},${e});
-  node["shop"](${s},${w},${n},${e});
-  node["amenity"](${s},${w},${n},${e});
-  node["wheelchair"](${s},${w},${n},${e});
-  node["toilets:wheelchair"](${s},${w},${n},${e});
-);
-out body;`;
-  }
-
-  async function fetchOverpassData() {
-    if (!map) return;
-    if (abortController) abortController.abort();
-    abortController = new AbortController();
-
-    isFetching = true;
-    updateStatus("データ取得中...", "#dbeafe", "#1d4ed8");
-
-    const bbox = map.getBounds();
-    const query = buildQuery(bbox);
-    let success = false;
-
-    for (const endpoint of OVERPASS_ENDPOINTS) {
-      try {
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
-          body: `data=${encodeURIComponent(query)}`,
-          signal: abortController.signal
-        });
-
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-        const text = await res.text();
-        if (text.trim().startsWith('<')) throw new Error('XML/HTML応答');
-
-        const data = JSON.parse(text);
-        if (data && Array.isArray(data.elements)) {
-          data.elements.forEach(item => {
-            if (item.lat && item.lon) {
-              featureStore.set(item.id, item);
-            }
-          });
-          rebuildTileStatistics(); // 全取得データから固定タイルの集計を普遍更新
-          success = true;
-          break;
-        }
-      } catch (err) {
-        if (err.name === 'AbortError') return;
-        console.warn(`[Overpass] ${endpoint} スキップ: ${err.message}`);
-      }
-    }
-
-    isFetching = false;
-    updateStatus(success ? "正常" : "取得失敗(再試行推奨)", success ? "#dcfce7" : "#fee2e2", success ? "#15803d" : "#b91c1c");
-    renderLayers();
   }
 
   function latLngToTile(lat, lng, zoom) {
@@ -452,6 +383,192 @@ out body;`;
     const lat2 = (latRad2 * 180) / Math.PI;
 
     return [[Math.min(lat1, lat2), lon1], [Math.max(lat1, lat2), lon2]];
+  }
+
+  function handleMapChange() {
+    renderLayers();
+    // 画面内に未取得のタイルがあれば自動で取得
+    fetchAppropriateData(false);
+  }
+
+  /* --- ズームに応じた高速リクエスト切り替え --- */
+  function fetchAppropriateData(force = false) {
+    if (!map) return;
+    const zoom = map.getZoom();
+
+    if (zoom >= MAX_MAP_ZOOM) {
+      // Zoom 19: 個別アイコン用（詳細タグを取得）
+      fetchDetailData();
+    } else {
+      // Zoom < 19: タイル件数用（軽量クエリで件数のみ取得）
+      fetchLightweightTileCounts(force);
+    }
+  }
+
+  // タイル用軽量クエリ（座標と基本タグのみで転送量を激減）
+  function buildLightweightQuery(bbox) {
+    const s = bbox.getSouth();
+    const w = bbox.getWest();
+    const n = bbox.getNorth();
+    const e = bbox.getEast();
+
+    return `[out:json][timeout:15];
+(
+  node["barrier"="kerb"](${s},${w},${n},${e});
+  node["highway"="crossing"](${s},${w},${n},${e});
+  node["highway"="elevator"](${s},${w},${n},${e});
+  node["shop"](${s},${w},${n},${e});
+  node["amenity"](${s},${w},${n},${e});
+  node["wheelchair"](${s},${w},${n},${e});
+);
+out skel qt;
+out tags qt;`;
+  }
+
+  // Zoom 19用 詳細クエリ
+  function buildDetailQuery(bbox) {
+    const s = bbox.getSouth();
+    const w = bbox.getWest();
+    const n = bbox.getNorth();
+    const e = bbox.getEast();
+
+    return `[out:json][timeout:15];
+(
+  node["barrier"="kerb"](${s},${w},${n},${e});
+  node["kerb"](${s},${w},${n},${e});
+  node["highway"="crossing"](${s},${w},${n},${e});
+  node["highway"="elevator"](${s},${w},${n},${e});
+  node["shop"](${s},${w},${n},${e});
+  node["amenity"](${s},${w},${n},${e});
+  node["wheelchair"](${s},${w},${n},${e});
+  node["toilets:wheelchair"](${s},${w},${n},${e});
+);
+out body;`;
+  }
+
+  async function fetchLightweightTileCounts(force = false) {
+    if (isFetching) return;
+
+    // 現在画面内のタイルキーを特定
+    const bounds = map.getBounds();
+    const nwTile = latLngToTile(bounds.getNorth(), bounds.getWest(), TILE_BASE_ZOOM);
+    const seTile = latLngToTile(bounds.getSouth(), bounds.getEast(), TILE_BASE_ZOOM);
+
+    let needsFetch = force;
+    if (!needsFetch) {
+      for (let x = Math.min(nwTile.x, seTile.x); x <= Math.max(nwTile.x, seTile.x); x++) {
+        for (let y = Math.min(nwTile.y, seTile.y); y <= Math.max(nwTile.y, seTile.y); y++) {
+          if (!fetchedTilesSet.has(`${x}_${y}`)) {
+            needsFetch = true;
+            break;
+          }
+        }
+      }
+    }
+    if (!needsFetch) return; // 全タイル取得済みなら即終了
+
+    isFetching = true;
+    updateStatus("件数取得中...", "#dbeafe", "#1d4ed8");
+
+    if (abortController) abortController.abort();
+    abortController = new AbortController();
+
+    const query = buildLightweightQuery(bounds);
+    let success = false;
+
+    for (const endpoint of OVERPASS_ENDPOINTS) {
+      try {
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+          body: `data=${encodeURIComponent(query)}`,
+          signal: abortController.signal
+        });
+
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const text = await res.text();
+        if (text.trim().startsWith('<')) throw new Error('XML/HTML応答');
+
+        const data = JSON.parse(text);
+        if (data && Array.isArray(data.elements)) {
+          // タイル別集計を更新
+          data.elements.forEach(item => {
+            if (!item.lat || !item.lon) return;
+            const t = latLngToTile(item.lat, item.lon, TILE_BASE_ZOOM);
+            const key = `${t.x}_${t.y}`;
+            if (!tileStatsStore.has(key)) tileStatsStore.set(key, { total: 0, tagged: 0 });
+
+            const stat = tileStatsStore.get(key);
+            stat.total += 1;
+            if (evaluateAccessibility(item.tags).isRegistered) {
+              stat.tagged += 1;
+            }
+          });
+
+          // 画面内のタイルを取得済みとしてマーク
+          for (let x = Math.min(nwTile.x, seTile.x); x <= Math.max(nwTile.x, seTile.x); x++) {
+            for (let y = Math.min(nwTile.y, seTile.y); y <= Math.max(nwTile.y, seTile.y); y++) {
+              fetchedTilesSet.add(`${x}_${y}`);
+            }
+          }
+          success = true;
+          break;
+        }
+      } catch (err) {
+        if (err.name === 'AbortError') return;
+        console.warn(`[Overpass Count] ${endpoint} スキップ: ${err.message}`);
+      }
+    }
+
+    isFetching = false;
+    updateStatus(success ? "正常" : "取得待機中", success ? "#dcfce7" : "#fef3c7", success ? "#15803d" : "#b45309");
+    renderLayers();
+  }
+
+  async function fetchDetailData() {
+    if (isFetching) return;
+    isFetching = true;
+    updateStatus("地物詳細取得中...", "#dbeafe", "#1d4ed8");
+
+    if (abortController) abortController.abort();
+    abortController = new AbortController();
+
+    const bbox = map.getBounds();
+    const query = buildDetailQuery(bbox);
+    let success = false;
+
+    for (const endpoint of OVERPASS_ENDPOINTS) {
+      try {
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+          body: `data=${encodeURIComponent(query)}`,
+          signal: abortController.signal
+        });
+
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const text = await res.text();
+        if (text.trim().startsWith('<')) throw new Error('XML/HTML応答');
+
+        const data = JSON.parse(text);
+        if (data && Array.isArray(data.elements)) {
+          data.elements.forEach(item => {
+            if (item.lat && item.lon) {
+              detailFeatureStore.set(item.id, item);
+            }
+          });
+          success = true;
+          break;
+        }
+      } catch (err) {
+        if (err.name === 'AbortError') return;
+        console.warn(`[Overpass Detail] ${endpoint} スキップ: ${err.message}`);
+      }
+    }
+
+    isFetching = false;
+    updateStatus(success ? "正常" : "取得失敗(再試行推奨)", success ? "#dcfce7" : "#fee2e2", success ? "#15803d" : "#b91c1c");
+    renderLayers();
   }
 
   function evaluateAccessibility(tags = {}) {
@@ -493,24 +610,6 @@ out body;`;
     return { isRegistered: false, passStatus: 'unknown', type: 'poi', desc: `${tags.name || '施設/店舗'} (バリアフリー未登録)` };
   }
 
-  // 画面の視界範囲（Viewport）に依存せず、各タイル固有の集計値を固定計算
-  function rebuildTileStatistics() {
-    tileStatsStore.clear();
-
-    featureStore.forEach(el => {
-      const t = latLngToTile(el.lat, el.lon, TILE_BASE_ZOOM);
-      const key = `${t.x}_${t.y}`;
-      if (!tileStatsStore.has(key)) {
-        tileStatsStore.set(key, { total: 0, tagged: 0 });
-      }
-      const stat = tileStatsStore.get(key);
-      stat.total += 1;
-      if (evaluateAccessibility(el.tags).isRegistered) {
-        stat.tagged += 1;
-      }
-    });
-  }
-
   function getRatioColor(ratio, totalEligible) {
     if (totalEligible === 0) {
       return { fill: 'transparent', fillOpacity: 0.0, stroke: 'rgba(148, 163, 184, 0.2)' };
@@ -546,12 +645,18 @@ out body;`;
     const minY = Math.min(nwTile.y, seTile.y);
     const maxY = Math.max(nwTile.y, seTile.y);
 
-    // 画面内と交差している固定タイルのみ描画（数値は事前計算された固定値を使用）
+    let screenTotal = 0;
+    let screenTagged = 0;
+
     for (let x = minX; x <= maxX; x++) {
       for (let y = minY; y <= maxY; y++) {
         const cellBounds = tileToLatLngBounds(x, y, TILE_BASE_ZOOM);
         const key = `${x}_${y}`;
         const stat = tileStatsStore.get(key) || { total: 0, tagged: 0 };
+
+        screenTotal += stat.total;
+        screenTagged += stat.tagged;
+
         const ratio = stat.total > 0 ? (stat.tagged / stat.total) : 0;
         const colorStyle = getRatioColor(ratio, stat.total);
 
@@ -563,7 +668,6 @@ out body;`;
           interactive: false
         }).addTo(gridLayer);
 
-        // タイル内に地物が存在する場合、そのタイル固有の固定カウント・比率を表示
         if (stat.total > 0) {
           const centerLat = (cellBounds[0][0] + cellBounds[1][0]) / 2;
           const centerLng = (cellBounds[0][1] + cellBounds[1][1]) / 2;
@@ -585,29 +689,23 @@ out body;`;
         }
       }
     }
+
+    document.getElementById('count-info').innerText = `付与済: ${screenTagged} / 候補: ${screenTotal}`;
   }
 
   function renderLayers() {
     if (!map) return;
     const zoom = map.getZoom();
-    const elements = Array.from(featureStore.values());
-
-    let registeredCount = 0;
-    elements.forEach(el => {
-      if (evaluateAccessibility(el.tags).isRegistered) registeredCount++;
-    });
-
     document.getElementById('zoom-info').innerText = `ズーム: ${zoom}`;
-    document.getElementById('count-info').innerText = `付与済: ${registeredCount} / 候補: ${elements.length}`;
 
-    // 地図移動時も不変のタイルヒートマップを描画
+    // タイルヒートマップを描画
     renderFixedGridHeatmap();
 
-    // Zoom 19 (最大ズーム) の個別ピン
+    // Zoom 19 (最大ズーム) のみ個別ピンを描画
     markersLayer.clearLayers();
     if (zoom >= MAX_MAP_ZOOM) {
       const bounds = map.getBounds();
-      elements.forEach(el => {
+      detailFeatureStore.forEach(el => {
         if (bounds.contains([el.lat, el.lon])) {
           createStyledMarker(el).addTo(markersLayer);
         }
