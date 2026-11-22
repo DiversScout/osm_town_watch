@@ -12,7 +12,7 @@
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body, #map { width: 100%; height: 100%; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
 
-    /* UI パネル */
+    /* UI コントロールパネル */
     .control-panel {
       position: absolute;
       top: 14px;
@@ -22,7 +22,7 @@
       backdrop-filter: blur(4px);
       padding: 12px 14px;
       border-radius: 12px;
-      box-shadow: 0 4px 14px rgba(0,0,0,0.18);
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
       z-index: 1000;
     }
     .panel-header {
@@ -43,6 +43,7 @@
       background: #e2e8f0;
       color: #475569;
       font-weight: 600;
+      transition: background-color 0.2s, color 0.2s;
     }
     .panel-meta {
       font-size: 12px;
@@ -78,7 +79,7 @@
     }
     .btn-primary:hover { background: #1d4ed8; }
 
-    /* グリッドタイル カウント表示ラベル */
+    /* グリッドタイル中央の件数ラベル */
     .grid-count-label {
       background: transparent;
       border: none;
@@ -97,11 +98,11 @@
       font-size: 12px;
       font-weight: 800;
       color: #ffffff;
-      text-shadow: 0 1px 2px rgba(0,0,0,0.8), 0 0 4px rgba(0,0,0,0.7);
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8), 0 0 4px rgba(0, 0, 0, 0.7);
       pointer-events: none;
     }
 
-    /* アイコンピン (最大ズーム: Zoom 19) */
+    /* アイコンピン (最大解像度 Zoom 19) */
     .poi-icon {
       display: flex;
       align-items: center;
@@ -110,7 +111,7 @@
       height: 28px !important;
       border-radius: 50%;
       border: 2px solid #ffffff;
-      box-shadow: 0 2px 6px rgba(0,0,0,0.35);
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
       font-size: 14px;
       color: #ffffff;
     }
@@ -130,7 +131,7 @@
     }
   </style>
 
-  <!-- Leaflet Script -->
+  <!-- Leaflet -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 </head>
 <body>
@@ -154,17 +155,19 @@
 </div>
 
 <script>
+  // 門司港駅（デフォルト中心位置）
   const MOJIKO_COORDS = [33.9452, 130.9616];
   const MAX_MAP_ZOOM = 19;
-  const GRID_ROWS = 8;
-  const GRID_COLS = 12;
+  const GRID_ROWS = 8;  // 画面縦8コマ
+  const GRID_COLS = 12; // 画面横12コマ
 
-  // 安定エンドポイント
+  // OSM Wiki掲載インスタンスから、HTTPS・CORS対応・低負荷順に選定したエンドポイント
   const OVERPASS_ENDPOINTS = [
-    "https://overpass.private.coffee/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.osm.ch/api/interpreter"
+    "https://overpass.osm.ch/api/interpreter",          // スイス（低負荷・高速）
+    "https://overpass.kumi.systems/api/interpreter",    // Kumi Systems
+    "https://overpass.private.coffee/api/interpreter",  // コミュニティミラー
+    "https://overpass-api.de/api/interpreter",          // メイン（混雑時はフォールバック）
+    "https://lz4.overpass-api.de/api/interpreter"       // メイン予備
   ];
 
   let map = null;
@@ -186,13 +189,14 @@
   function initMap() {
     map = L.map('map', {
       center: MOJIKO_COORDS,
-      zoom: 17,
+      zoom: 16,
       maxZoom: MAX_MAP_ZOOM,
       zoomControl: false
     });
 
     L.control.zoom({ position: 'topright' }).addTo(map);
 
+    // OpenStreetMap 公式タイル
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: MAX_MAP_ZOOM,
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
@@ -211,6 +215,7 @@
       fetchOverpassData();
     });
 
+    // 初回ロード時の現在地判定
     requestGeolocation(false);
   }
 
@@ -260,17 +265,14 @@
     const n = bbox.getNorth();
     const e = bbox.getEast();
 
-    // 取得対象をnodeに絞り、高速レスポンスを確保
-    return `
-      [out:json][timeout:15];
-      (
-        node["wheelchair"](${s},${w},${n},${e});
-        node["highway"="elevator"](${s},${w},${n},${e});
-        node["toilets:wheelchair"](${s},${w},${n},${e});
-        node["barrier"="kerb"](${s},${w},${n},${e});
-      );
-      out body;
-    `;
+    return `[out:json][timeout:15];
+(
+  node["wheelchair"](${s},${w},${n},${e});
+  node["highway"="elevator"](${s},${w},${n},${e});
+  node["toilets:wheelchair"](${s},${w},${n},${e});
+  node["barrier"="kerb"](${s},${w},${n},${e});
+);
+out body;`;
   }
 
   async function fetchOverpassData() {
@@ -291,7 +293,9 @@
       try {
         const res = await fetch(endpoint, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
+          },
           body: `data=${encodeURIComponent(query)}`,
           signal: abortController.signal
         });
@@ -299,10 +303,9 @@
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
 
-        if (data && data.elements) {
+        if (data && Array.isArray(data.elements)) {
           data.elements.forEach(item => {
             if (item.lat && item.lon) {
-              // 実際のOSMノードIDでキャッシュ
               featureStore.set(item.id, item);
             }
           });
@@ -311,7 +314,7 @@
         }
       } catch (err) {
         if (err.name === 'AbortError') return;
-        console.warn(`Endpoint failed [${endpoint}]:`, err.message);
+        console.warn(`[Overpass] ${endpoint} エラー: ${err.message} -> 次のサーバーへ`);
       }
     }
 
@@ -320,6 +323,7 @@
     renderLayers();
   }
 
+  // 地物数に応じた透過グラデーションカラー算出
   function getTileColor(count, maxCount) {
     if (count === 0) return { fill: 'transparent', fillOpacity: 0.0, stroke: 'rgba(148, 163, 184, 0.2)' };
 
@@ -351,6 +355,7 @@
     };
   }
 
+  // 画面内を縦8×横12に分割してグリッド描画
   function renderGridHeatmap(elements) {
     gridLayer.clearLayers();
 
@@ -421,12 +426,12 @@
     document.getElementById('zoom-info').innerText = `ズーム: ${zoom} / 最大:${MAX_MAP_ZOOM}`;
     document.getElementById('count-info').innerText = `地物数: ${elements.length} 件`;
 
-    // 最大ズーム未満: グリッドヒートマップ
+    // 最大ズーム未満 (Zoom < 19): 縦8×横12のグリッドヒートマップ
     if (zoom < MAX_MAP_ZOOM) {
       if (markersLayer) markersLayer.clearLayers();
       renderGridHeatmap(elements);
     }
-    // 最大ズーム (Zoom 19): 個別地物をアイコン強調表示
+    // 最大ズーム (Zoom 19): 個別地物アイコン強調表示
     else {
       if (gridLayer) gridLayer.clearLayers();
 
@@ -463,7 +468,6 @@
       title = `段差/縁石 (${tags.kerb || '詳細なし'})`;
     }
 
-    // 28x28px のアイコン中心 [14, 14] を座標位置に正確に合致
     const icon = L.divIcon({
       className: `poi-icon ${iconClass}`,
       html: iconChar,
