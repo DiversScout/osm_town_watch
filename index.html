@@ -155,21 +155,19 @@
 </div>
 
 <script>
-  // 門司港駅
   const MOJIKO_COORDS = [33.9452, 130.9616];
   const MAX_MAP_ZOOM = 19;
-  const TILE_BASE_ZOOM = 16; // 約600m四方の固定タイル単位
+  const TILE_BASE_ZOOM = 16; // 固定グリッド基準ズーム
 
-  // セッションストレージキー
   const STORAGE_KEY_MAP_STATE = "osm_barrier_view_state";
 
-  // OSM Wiki掲載インスタンス（HTTPS/CORS/安定性順）
+  // JSON出力を安定して返すエンドポイント順
   const OVERPASS_ENDPOINTS = [
-    "https://overpass.osm.ch/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
-    "https://overpass.private.coffee/api/interpreter",
     "https://overpass-api.de/api/interpreter",
-    "https://lz4.overpass-api.de/api/interpreter"
+    "https://lz4.overpass-api.de/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.osm.ch/api/interpreter"
   ];
 
   let map = null;
@@ -188,7 +186,6 @@
     el.style.color = fg;
   }
 
-  // セッションから前回の表示状態を取得
   function getSavedState() {
     try {
       const data = sessionStorage.getItem(STORAGE_KEY_MAP_STATE);
@@ -198,7 +195,6 @@
     }
   }
 
-  // 地図移動時に現在の中心座標とズームをセッションに退避
   function saveCurrentState() {
     if (!map) return;
     try {
@@ -218,7 +214,6 @@
     const savedState = getSavedState();
     const isReload = !!savedState;
 
-    // リロード時は前回の座標・ズームを適用、初回は門司港駅
     const initCenter = isReload ? [savedState.lat, savedState.lng] : MOJIKO_COORDS;
     const initZoom = isReload ? savedState.zoom : 16;
 
@@ -231,7 +226,6 @@
 
     L.control.zoom({ position: 'topright' }).addTo(map);
 
-    // OpenStreetMap 公式タイル
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: MAX_MAP_ZOOM,
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
@@ -240,7 +234,6 @@
     gridLayer = L.layerGroup().addTo(map);
     markersLayer = L.layerGroup().addTo(map);
 
-    // 画面操作時にレイヤー再計算および座標保存
     map.on('zoomend', () => {
       saveCurrentState();
       renderLayers();
@@ -259,11 +252,9 @@
     });
 
     if (isReload) {
-      // リロード時: 前回の位置を維持したまま、該当エリアのOverpassデータを再取得
       updateStatus("リロード復元", "#e0e7ff", "#3730a3");
       fetchOverpassData();
     } else {
-      // 初回セッション時のみ: 現在地判定を試行
       requestGeolocation(false);
     }
   }
@@ -351,7 +342,15 @@ out body;`;
         });
 
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
+
+        // テキストで受信してXML/HTML混入をチェック（JSONパースクラッシュを防ぐ）
+        const text = await res.text();
+        const trimmed = text.trim();
+        if (trimmed.startsWith('<')) {
+          throw new Error('サーバーがXMLまたはHTMLを返しました');
+        }
+
+        const data = JSON.parse(text);
 
         if (data && Array.isArray(data.elements)) {
           data.elements.forEach(item => {
@@ -364,7 +363,7 @@ out body;`;
         }
       } catch (err) {
         if (err.name === 'AbortError') return;
-        console.warn(`[Overpass] ${endpoint} エラー: ${err.message} -> 次のサーバーへ`);
+        console.warn(`[Overpass] ${endpoint} 取得スキップ: ${err.message} -> 次のサーバーへ`);
       }
     }
 
