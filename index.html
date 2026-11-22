@@ -140,7 +140,7 @@
 <div class="control-panel">
   <div class="panel-header">
     <div class="panel-title">バリアフリー情報可視化</div>
-    <div id="status-badge" class="status-badge">初期化中</div>
+    <div id="status-badge" class="status-badge">準備中</div>
   </div>
   <div class="panel-meta">
     <span id="zoom-info">ズーム: --</span>
@@ -154,35 +154,17 @@
 </div>
 
 <script>
-  // 門司港駅
   const MOJIKO_COORDS = [33.9452, 130.9616];
-  
-  // 最大ズームレベル設定 (OSM標準上限: 19)
   const MAX_MAP_ZOOM = 19;
-  const GRID_ROWS = 8;  // 縦8コマ
-  const GRID_COLS = 12; // 横12コマ
+  const GRID_ROWS = 8;
+  const GRID_COLS = 12;
 
-  // Overpass API エンドポイント
+  // 安定エンドポイント
   const OVERPASS_ENDPOINTS = [
     "https://overpass.private.coffee/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass-api.de/api/interpreter",
-    "https://lz4.overpass-api.de/api/interpreter",
     "https://overpass.osm.ch/api/interpreter"
-  ];
-
-  // 門司港駅周辺シードデータ (フォールバック用)
-  const MOJIKO_SEED_DATA = [
-    { id: 'seed-1', lat: 33.9452, lon: 130.9616, tags: { name: "門司港駅", wheelchair: "yes" } },
-    { id: 'seed-2', lat: 33.9455, lon: 130.9620, tags: { amenity: "toilets", "toilets:wheelchair": "yes" } },
-    { id: 'seed-3', lat: 33.9448, lon: 130.9612, tags: { highway: "elevator" } },
-    { id: 'seed-4', lat: 33.9460, lon: 130.9635, tags: { name: "旧門司税関", wheelchair: "yes" } },
-    { id: 'seed-5', lat: 33.9468, lon: 130.9650, tags: { name: "門司港レトロ展望室", wheelchair: "yes", highway: "elevator" } },
-    { id: 'seed-6', lat: 33.9472, lon: 130.9658, tags: { barrier: "kerb", kerb: "lowered" } },
-    { id: 'seed-7', lat: 33.9442, lon: 130.9605, tags: { barrier: "kerb", kerb: "lowered" } },
-    { id: 'seed-8', lat: 33.9438, lon: 130.9598, tags: { amenity: "toilets", "toilets:wheelchair": "yes" } },
-    { id: 'seed-9', lat: 33.9450, lon: 130.9625, tags: { barrier: "kerb", kerb: "lowered" } },
-    { id: 'seed-10', lat: 33.9458, lon: 130.9610, tags: { wheelchair: "yes" } }
   ];
 
   let map = null;
@@ -191,6 +173,7 @@
   let currentLocationMarker = null;
   let featureStore = new Map();
   let isFetching = false;
+  let abortController = null;
 
   function updateStatus(text, bg = "#e2e8f0", fg = "#475569") {
     const el = document.getElementById('status-badge');
@@ -203,14 +186,13 @@
   function initMap() {
     map = L.map('map', {
       center: MOJIKO_COORDS,
-      zoom: 15,
+      zoom: 17,
       maxZoom: MAX_MAP_ZOOM,
       zoomControl: false
     });
 
     L.control.zoom({ position: 'topright' }).addTo(map);
 
-    // OpenStreetMap 公式タイル
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: MAX_MAP_ZOOM,
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
@@ -219,17 +201,13 @@
     gridLayer = L.layerGroup().addTo(map);
     markersLayer = L.layerGroup().addTo(map);
 
-    // シードデータ初期登録
-    MOJIKO_SEED_DATA.forEach(d => featureStore.set(d.id, d));
-    renderLayers();
-
     map.on('zoomend', renderLayers);
     map.on('moveend', renderLayers);
 
     document.getElementById('btn-reload').addEventListener('click', () => fetchOverpassData());
     document.getElementById('btn-locate').addEventListener('click', () => requestGeolocation(true));
     document.getElementById('btn-mojiko').addEventListener('click', () => {
-      map.setView(MOJIKO_COORDS, 16);
+      map.setView(MOJIKO_COORDS, 19);
       fetchOverpassData();
     });
 
@@ -250,7 +228,7 @@
         const lat = pos.coords.latitude;
         const lng = pos.coords.longitude;
         setCurMarker(lat, lng);
-        map.setView([lat, lng], 16);
+        map.setView([lat, lng], 19);
         updateStatus("現在地表示中", "#dcfce7", "#15803d");
         fetchOverpassData();
       },
@@ -259,7 +237,7 @@
         updateStatus("門司港駅 (標準)", "#e2e8f0", "#475569");
         fetchOverpassData();
       },
-      { enableHighAccuracy: false, timeout: 6000, maximumAge: 60000 }
+      { enableHighAccuracy: false, timeout: 5000, maximumAge: 60000 }
     );
   }
 
@@ -282,8 +260,9 @@
     const n = bbox.getNorth();
     const e = bbox.getEast();
 
+    // 取得対象をnodeに絞り、高速レスポンスを確保
     return `
-      [out:json][timeout:25];
+      [out:json][timeout:15];
       (
         node["wheelchair"](${s},${w},${n},${e});
         node["highway"="elevator"](${s},${w},${n},${e});
@@ -295,7 +274,12 @@
   }
 
   async function fetchOverpassData() {
-    if (isFetching || !map) return;
+    if (!map) return;
+    if (abortController) {
+      abortController.abort();
+    }
+    abortController = new AbortController();
+
     isFetching = true;
     updateStatus("データ取得中...", "#dbeafe", "#1d4ed8");
 
@@ -309,15 +293,16 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: `data=${encodeURIComponent(query)}`,
-          signal: AbortSignal.timeout(25000)
+          signal: abortController.signal
         });
 
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
 
-        if (data && data.elements && data.elements.length > 0) {
+        if (data && data.elements) {
           data.elements.forEach(item => {
             if (item.lat && item.lon) {
+              // 実際のOSMノードIDでキャッシュ
               featureStore.set(item.id, item);
             }
           });
@@ -325,12 +310,13 @@
           break;
         }
       } catch (err) {
-        console.warn(`Fallback triggered: ${endpoint} failed.`, err.message);
+        if (err.name === 'AbortError') return;
+        console.warn(`Endpoint failed [${endpoint}]:`, err.message);
       }
     }
 
     isFetching = false;
-    updateStatus(success ? "正常" : "Overpass混雑中(シード表示)", success ? "#dcfce7" : "#fef3c7", success ? "#15803d" : "#b45309");
+    updateStatus(success ? "正常" : "取得失敗(再試行推奨)", success ? "#dcfce7" : "#fee2e2", success ? "#15803d" : "#b91c1c");
     renderLayers();
   }
 
@@ -365,7 +351,6 @@
     };
   }
 
-  // 縦8コマ×横12コマのグリッド透過ヒートマップ描画
   function renderGridHeatmap(elements) {
     gridLayer.clearLayers();
 
@@ -436,7 +421,7 @@
     document.getElementById('zoom-info').innerText = `ズーム: ${zoom} / 最大:${MAX_MAP_ZOOM}`;
     document.getElementById('count-info').innerText = `地物数: ${elements.length} 件`;
 
-    // 最大ズーム未満 (Zoom < 19): タイル表示を維持
+    // 最大ズーム未満: グリッドヒートマップ
     if (zoom < MAX_MAP_ZOOM) {
       if (markersLayer) markersLayer.clearLayers();
       renderGridHeatmap(elements);
@@ -478,15 +463,18 @@
       title = `段差/縁石 (${tags.kerb || '詳細なし'})`;
     }
 
+    // 28x28px のアイコン中心 [14, 14] を座標位置に正確に合致
     const icon = L.divIcon({
       className: `poi-icon ${iconClass}`,
       html: iconChar,
       iconSize: [28, 28],
-      iconAnchor: [14, 14]
+      iconAnchor: [14, 14],
+      popupAnchor: [0, -14]
     });
 
     const marker = L.marker([item.lat, item.lon], { icon });
     let popup = `<strong>${title}</strong><div style="font-size:11px; margin-top:4px; max-height:140px; overflow-y:auto;">`;
+    popup += `<div style="color:#64748b; margin-bottom:2px;">OSM ID: ${item.id}</div>`;
     for (const [k, v] of Object.entries(tags)) {
       popup += `<div><span style="color:#64748b;">${k}:</span> ${v}</div>`;
     }
