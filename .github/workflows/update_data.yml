@@ -2,9 +2,9 @@ name: Update Nationwide Barrier Data (PBF)
 
 on:
   schedule:
-    # 毎週日曜日の午前3時 (JST) / 土曜日 18:00 (UTC)
+    # 毎週日曜日 03:00 JST (土曜日 18:00 UTC)
     - cron: '0 18 * * 6'
-  workflow_dispatch: # 手動即時実行
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -12,9 +12,17 @@ permissions:
 jobs:
   build-nationwide-tiles:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
+      - name: Maximize build disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          df -h
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -25,20 +33,20 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Osmium and Dependencies
+      - name: Install Osmium
         run: |
           pip install osmium requests
 
       - name: Download Japan OSM PBF
         run: |
-          echo "Downloading japan-latest.osm.pbf from Geofabrik..."
-          curl -L -o japan-latest.osm.pbf https://download.geofabrik.de/asia/japan-latest.osm.pbf
+          echo "Downloading japan-latest.osm.pbf..."
+          curl -L -f -o japan-latest.osm.pbf https://download.geofabrik.de/asia/japan-latest.osm.pbf
 
       - name: Run PBF Aggregator
         run: |
           python scripts/aggregate_pbf.py japan-latest.osm.pbf
 
-      - name: Cleanup PBF File
+      - name: Remove PBF file
         run: |
           rm -f japan-latest.osm.pbf
 
