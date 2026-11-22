@@ -48,10 +48,41 @@
     .panel-meta {
       font-size: 12px;
       color: #64748b;
-      margin-bottom: 10px;
+      margin-bottom: 8px;
       display: flex;
       justify-content: space-between;
     }
+
+    /* 凡例表示 */
+    .legend-row {
+      display: flex;
+      gap: 10px;
+      font-size: 11px;
+      color: #475569;
+      margin-bottom: 10px;
+      padding: 4px 8px;
+      background: #f8fafc;
+      border-radius: 6px;
+      border: 1px solid #e2e8f0;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .legend-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+    .legend-rect {
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+      border: 1px dashed #64748b;
+      background: #cbd5e1;
+    }
+
     .btn-group {
       display: flex;
       gap: 6px;
@@ -79,7 +110,7 @@
     }
     .btn-primary:hover { background: #1d4ed8; }
 
-    /* 固定グリッドタイル中央のバッジ（付与数/対象総数 と 割合） */
+    /* 固定グリッドタイル中央のバッジ */
     .grid-count-label {
       background: transparent;
       border: none;
@@ -112,23 +143,35 @@
       line-height: 1.1;
     }
 
-    /* アイコンピン (Zoom 19でオーバーレイ強調) */
+    /* アイコンピン共通基底 */
     .poi-icon {
       display: flex;
       align-items: center;
       justify-content: center;
       width: 28px !important;
       height: 28px !important;
-      border-radius: 50%;
-      border: 2px solid #ffffff;
-      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
-      font-size: 14px;
+      font-size: 13px;
       color: #ffffff;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+      transition: transform 0.1s;
     }
-    .poi-wheelchair { background-color: #0284c7; }
-    .poi-elevator   { background-color: #16a34a; }
-    .poi-toilet     { background-color: #ea580c; }
-    .poi-kerb       { background-color: #9333ea; }
+
+    /* 【形状】登録状況による区分 */
+    .shape-registered {
+      border-radius: 50%; /* 丸：登録済み */
+      border: 2px solid #ffffff;
+    }
+    .shape-unregistered {
+      border-radius: 6px; /* 四角：未登録 */
+      border: 2px dashed #ffffff;
+      opacity: 0.85;
+    }
+
+    /* 【色】通行可否による区分 */
+    .color-passable { background-color: #16a34a; } /* 緑：通行可・スロープ/段差解消済 */
+    .color-limited  { background-color: #f59e0b; } /* 黄：要介助・条件付き */
+    .color-blocked  { background-color: #dc2626; } /* 赤：通行不可・高い段差あり */
+    .color-unknown  { background-color: #64748b; } /* 灰：未調査・詳細不明 */
 
     /* 現在地ピン */
     .current-loc-marker {
@@ -157,6 +200,14 @@
     <span id="zoom-info">ズーム: --</span>
     <span id="count-info">付与済: 0 / 候補: 0</span>
   </div>
+
+  <div class="legend-row">
+    <div class="legend-item"><span class="legend-dot" style="background:#16a34a;"></span><span>可(丸)</span></div>
+    <div class="legend-item"><span class="legend-dot" style="background:#f59e0b;"></span><span>要介助</span></div>
+    <div class="legend-item"><span class="legend-dot" style="background:#dc2626;"></span><span>不可(段差)</span></div>
+    <div class="legend-item"><span class="legend-rect"></span><span>未調査(四角)</span></div>
+  </div>
+
   <div class="btn-group">
     <button class="btn btn-primary" id="btn-reload">エリア再取得</button>
     <button class="btn" id="btn-locate">現在地へ移動</button>
@@ -166,13 +217,12 @@
 
 <script>
   const MOJIKO_COORDS = [33.9452, 130.9616];
-  const DEFAULT_ZOOM = 18; // 初期表示・復元時の標準ズーム
+  const DEFAULT_ZOOM = 18;
   const MAX_MAP_ZOOM = 19;
-  const TILE_BASE_ZOOM = 16; // 固定グリッド基準ズーム（約600m四方）
+  const TILE_BASE_ZOOM = 16;
 
   const STORAGE_KEY_MAP_STATE = "osm_barrier_view_state";
 
-  // Overpass API エンドポイント
   const OVERPASS_ENDPOINTS = [
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass-api.de/api/interpreter",
@@ -210,12 +260,11 @@
     if (!map) return;
     try {
       const center = map.getCenter();
-      const state = {
+      sessionStorage.setItem(STORAGE_KEY_MAP_STATE, JSON.stringify({
         lat: center.lat,
         lng: center.lng,
         zoom: map.getZoom()
-      };
-      sessionStorage.setItem(STORAGE_KEY_MAP_STATE, JSON.stringify(state));
+      }));
     } catch (e) {
       console.warn("sessionStorage save failed:", e);
     }
@@ -237,7 +286,6 @@
 
     L.control.zoom({ position: 'topright' }).addTo(map);
 
-    // OpenStreetMap 公式タイル
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: MAX_MAP_ZOOM,
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
@@ -312,7 +360,7 @@
     }
   }
 
-  // 店舗・交差点・施設などバリアフリータグが付与されるべき地物を網羅取得
+  // 縁石(kerb)を含め、バリアフリー関係地物を網羅取得
   function buildQuery(bbox) {
     const s = bbox.getSouth();
     const w = bbox.getWest();
@@ -321,11 +369,12 @@
 
     return `[out:json][timeout:15];
 (
-  node["shop"](${s},${w},${n},${e});
-  node["amenity"](${s},${w},${n},${e});
+  node["barrier"="kerb"](${s},${w},${n},${e});
+  node["kerb"](${s},${w},${n},${e});
   node["highway"="crossing"](${s},${w},${n},${e});
   node["highway"="elevator"](${s},${w},${n},${e});
-  node["barrier"="kerb"](${s},${w},${n},${e});
+  node["shop"](${s},${w},${n},${e});
+  node["amenity"](${s},${w},${n},${e});
   node["wheelchair"](${s},${w},${n},${e});
   node["toilets:wheelchair"](${s},${w},${n},${e});
 );
@@ -334,9 +383,7 @@ out body;`;
 
   async function fetchOverpassData() {
     if (!map) return;
-    if (abortController) {
-      abortController.abort();
-    }
+    if (abortController) abortController.abort();
     abortController = new AbortController();
 
     isFetching = true;
@@ -350,9 +397,7 @@ out body;`;
       try {
         const res = await fetch(endpoint, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
-          },
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
           body: `data=${encodeURIComponent(query)}`,
           signal: abortController.signal
         });
@@ -360,13 +405,9 @@ out body;`;
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
         const text = await res.text();
-        const trimmed = text.trim();
-        if (trimmed.startsWith('<')) {
-          throw new Error('サーバーがXML/HTMLを返却しました');
-        }
+        if (text.trim().startsWith('<')) throw new Error('XML/HTML応答');
 
         const data = JSON.parse(text);
-
         if (data && Array.isArray(data.elements)) {
           data.elements.forEach(item => {
             if (item.lat && item.lon) {
@@ -378,7 +419,7 @@ out body;`;
         }
       } catch (err) {
         if (err.name === 'AbortError') return;
-        console.warn(`[Overpass] ${endpoint} スキップ: ${err.message} -> 次へ`);
+        console.warn(`[Overpass] ${endpoint} スキップ: ${err.message}`);
       }
     }
 
@@ -387,7 +428,6 @@ out body;`;
     renderLayers();
   }
 
-  /* --- Webメルカトル固定タイルの座標計算 --- */
   function latLngToTile(lat, lng, zoom) {
     const latRad = (lat * Math.PI) / 180;
     const n = Math.pow(2, zoom);
@@ -410,51 +450,74 @@ out body;`;
     return [[Math.min(lat1, lat2), lon1], [Math.max(lat1, lat2), lon2]];
   }
 
-  // バリアフリータグが付与されているかを判定
-  function hasBarrierFreeTag(tags) {
-    if (!tags) return false;
-    if (tags.wheelchair && tags.wheelchair !== 'no') return true;
-    if (tags['toilets:wheelchair'] && tags['toilets:wheelchair'] !== 'no') return true;
-    if (tags.highway === 'elevator') return true;
-    if (tags.barrier === 'kerb' && tags.kerb && tags.kerb !== 'unknown') return true;
-    if (tags.kerb && tags.kerb !== 'unknown') return true;
-    if (tags.tactile_paving && tags.tactile_paving !== 'no') return true;
-    return false;
+  // 地物の「登録状況」と「通行ステータス」を解析
+  function evaluateAccessibility(tags = {}) {
+    // 1. 縁石 (Kerb) の判定
+    if (tags.barrier === 'kerb' || tags.kerb) {
+      const k = tags.kerb || '';
+      if (k === 'flush' || k === 'lowered') {
+        return { isRegistered: true, passStatus: 'passable', type: 'kerb', desc: `段差解消縁石 (${k})` };
+      } else if (k === 'raised') {
+        return { isRegistered: true, passStatus: 'blocked', type: 'kerb', desc: `段差あり縁石 (raised)` };
+      } else if (k && k !== 'unknown') {
+        return { isRegistered: true, passStatus: 'limited', type: 'kerb', desc: `縁石 (${k})` };
+      } else {
+        return { isRegistered: false, passStatus: 'unknown', type: 'kerb', desc: `縁石 (段差未記録)` };
+      }
+    }
+
+    // 2. エレベーター
+    if (tags.highway === 'elevator') {
+      return { isRegistered: true, passStatus: 'passable', type: 'elevator', desc: 'エレベーター' };
+    }
+
+    // 3. 車椅子タグ (wheelchair=*)
+    if (tags.wheelchair) {
+      if (tags.wheelchair === 'yes') {
+        return { isRegistered: true, passStatus: 'passable', type: 'poi', desc: '車椅子利用可 (wheelchair=yes)' };
+      } else if (tags.wheelchair === 'limited') {
+        return { isRegistered: true, passStatus: 'limited', type: 'poi', desc: '要介助/条件付 (wheelchair=limited)' };
+      } else if (tags.wheelchair === 'no') {
+        return { isRegistered: true, passStatus: 'blocked', type: 'poi', desc: '利用不可 (wheelchair=no)' };
+      }
+    }
+
+    // 4. 多機能トイレ
+    if (tags['toilets:wheelchair'] === 'yes') {
+      return { isRegistered: true, passStatus: 'passable', type: 'toilet', desc: '車椅子対応トイレ' };
+    }
+
+    // 5. バリアフリー情報が未登録の施設・交差点
+    if (tags.highway === 'crossing') {
+      return { isRegistered: false, passStatus: 'unknown', type: 'crossing', desc: '横断歩道 (バリアフリー未登録)' };
+    }
+
+    return { isRegistered: false, passStatus: 'unknown', type: 'poi', desc: `${tags.name || '施設/店舗'} (バリアフリー未登録)` };
   }
 
-  // 割合（ratio: 0.0〜1.0）に応じた色と高い透過率（OSM文字を鮮明にする）
   function getRatioColor(ratio, totalEligible) {
     if (totalEligible === 0) {
       return { fill: 'transparent', fillOpacity: 0.0, stroke: 'rgba(148, 163, 184, 0.2)' };
     }
 
     let r, g, b;
-    // 0%: 濃いオレンジ赤 -> 50%: 黄 -> 100%: 鮮やかな緑/シアン
     if (ratio < 0.25) {
-      // 0.0 - 0.25: 赤橙
-      r = 239; g = 68; b = 68;
+      r = 239; g = 68; b = 68; // 赤
     } else if (ratio < 0.5) {
-      // 0.25 - 0.5: 黄橙
-      r = 245; g = 158; b = 11;
+      r = 245; g = 158; b = 11; // 橙黄
     } else if (ratio < 0.75) {
-      // 0.5 - 0.75: 明るい黄緑
-      r = 132; g = 204; b = 22;
+      r = 132; g = 204; b = 22; // 黄緑
     } else {
-      // 0.75 - 1.0: 鮮やかな緑
-      r = 16; g = 185; b = 129;
+      r = 16; g = 185; b = 129; // 緑
     }
-
-    // 下地のOSM文字がくっきり読めるよう透過率を 0.15 〜 0.35 に設定
-    const fillOpacity = 0.18 + ratio * 0.15;
 
     return {
       fill: `rgb(${r}, ${g}, ${b})`,
-      fillOpacity: fillOpacity,
+      fillOpacity: 0.18 + ratio * 0.15,
       stroke: `rgba(${r}, ${g}, ${b}, 0.5)`
     };
   }
 
-  // 固定タイルの割合ヒートマップ描画
   function renderFixedGridHeatmap(elements) {
     gridLayer.clearLayers();
 
@@ -467,18 +530,17 @@ out body;`;
     const minY = Math.min(nwTile.y, seTile.y);
     const maxY = Math.max(nwTile.y, seTile.y);
 
-    const tileStats = new Map(); // key -> { total: 0, tagged: 0 }
+    const tileStats = new Map();
 
     elements.forEach(el => {
       if (bounds.contains([el.lat, el.lon])) {
         const t = latLngToTile(el.lat, el.lon, TILE_BASE_ZOOM);
         const key = `${t.x}_${t.y}`;
-        if (!tileStats.has(key)) {
-          tileStats.set(key, { total: 0, tagged: 0 });
-        }
+        if (!tileStats.has(key)) tileStats.set(key, { total: 0, tagged: 0 });
+
         const stat = tileStats.get(key);
         stat.total += 1;
-        if (hasBarrierFreeTag(el.tags)) {
+        if (evaluateAccessibility(el.tags).isRegistered) {
           stat.tagged += 1;
         }
       }
@@ -528,58 +590,53 @@ out body;`;
     const zoom = map.getZoom();
     const elements = Array.from(featureStore.values());
 
-    let totalTagged = 0;
+    let registeredCount = 0;
     elements.forEach(el => {
-      if (hasBarrierFreeTag(el.tags)) totalTagged++;
+      if (evaluateAccessibility(el.tags).isRegistered) registeredCount++;
     });
 
     document.getElementById('zoom-info').innerText = `ズーム: ${zoom}`;
-    document.getElementById('count-info').innerText = `付与済: ${totalTagged} / 候補: ${elements.length}`;
+    document.getElementById('count-info').innerText = `付与済: ${registeredCount} / 候補: ${elements.length}`;
 
-    // すべてのズームレベルで固定グリッドヒートマップを表示維持
+    // グリッドヒートマップは常時表示維持
     renderFixedGridHeatmap(elements);
 
-    // Zoom 19 (最大ズーム) の場合は、グリッド上に個別の地物ピンをオーバーレイ描画
+    // Zoom 19 (最大ズーム) で形状と色を分けた個別ピンを表示
     markersLayer.clearLayers();
     if (zoom >= MAX_MAP_ZOOM) {
       const bounds = map.getBounds();
       elements.forEach(el => {
         if (bounds.contains([el.lat, el.lon])) {
-          // バリアフリータグがある地物、または交差点・施設をアイコン化
-          createMarker(el).addTo(markersLayer);
+          createStyledMarker(el).addTo(markersLayer);
         }
       });
     }
   }
 
-  function createMarker(item) {
+  // 登録状況（形状）と通行可否（色）を反映したマーカー生成
+  function createStyledMarker(item) {
     const tags = item.tags || {};
-    let iconClass = 'poi-wheelchair';
-    let iconChar = '♿';
-    let title = tags.name || '車椅子対応地物';
+    const evalResult = evaluateAccessibility(tags);
 
-    if (tags.highway === 'elevator') {
-      iconClass = 'poi-elevator';
-      iconChar = '🛗';
-      title = 'エレベーター';
-    } else if (tags['toilets:wheelchair'] || tags.amenity === 'toilets') {
-      iconClass = 'poi-toilet';
-      iconChar = '🚻';
-      title = '多機能トイレ';
-    } else if (tags.barrier === 'kerb' || tags.kerb) {
-      iconClass = 'poi-kerb';
-      iconChar = '⤓';
-      title = `段差/縁石 (${tags.kerb || '詳細なし'})`;
-    } else if (tags.highway === 'crossing') {
-      iconChar = '🚶';
-      title = `横断歩道 (${tags.wheelchair ? 'wheelchair=' + tags.wheelchair : 'タグ未設定'})`;
-    } else if (!hasBarrierFreeTag(tags)) {
-      iconChar = '❓';
-      title = `${tags.name || '施設/店舗'} (バリアフリー未登録)`;
-    }
+    // 1. 形状クラス (丸: 登録済 / 四角: 未登録)
+    const shapeClass = evalResult.isRegistered ? 'shape-registered' : 'shape-unregistered';
+
+    // 2. 色クラス (緑: 通行可 / 黄: 要介助 / 赤: 不可 / 灰: 未調査)
+    let colorClass = 'color-unknown';
+    if (evalResult.passStatus === 'passable') colorClass = 'color-passable';
+    else if (evalResult.passStatus === 'limited') colorClass = 'color-limited';
+    else if (evalResult.passStatus === 'blocked') colorClass = 'color-blocked';
+
+    // 3. ピクトグラム
+    let iconChar = '♿';
+    if (evalResult.type === 'kerb') iconChar = '⤓';
+    else if (evalResult.type === 'elevator') iconChar = '🛗';
+    else if (evalResult.type === 'toilet') iconChar = '🚻';
+    else if (evalResult.type === 'crossing') iconChar = '🚶';
+    else if (!evalResult.isRegistered) iconChar = '❓';
 
     const icon = L.divIcon({
-      className: `poi-icon ${iconClass}`,
+      className: `poi-icon ${shapeClass} ${colorClass}`,
       html: iconChar,
       iconSize: [28, 28],
       iconAnchor: [14, 14],
@@ -587,8 +644,12 @@ out body;`;
     });
 
     const marker = L.marker([item.lat, item.lon], { icon });
-    let popup = `<strong>${title}</strong><div style="font-size:11px; margin-top:4px; max-height:140px; overflow-y:auto;">`;
-    popup += `<div style="color:#64748b; margin-bottom:2px;">OSM ID: ${item.id}</div>`;
+
+    let statusText = evalResult.isRegistered ? '【登録済み】' : '【未登録・要調査】';
+    let popup = `<strong>${tags.name || evalResult.desc}</strong><br>`;
+    popup += `<div style="font-size:11px; margin-top:3px; font-weight:700; color:${evalResult.passStatus === 'passable' ? '#16a34a' : evalResult.passStatus === 'blocked' ? '#dc2626' : '#b45309'};">${statusText} ${evalResult.desc}</div>`;
+    popup += `<div style="font-size:11px; margin-top:4px; max-height:120px; overflow-y:auto; border-top:1px solid #f1f5f9; padding-top:4px;">`;
+    popup += `<div style="color:#64748b;">OSM ID: ${item.id}</div>`;
     for (const [k, v] of Object.entries(tags)) {
       popup += `<div><span style="color:#64748b;">${k}:</span> ${v}</div>`;
     }
