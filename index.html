@@ -212,10 +212,13 @@
 
   const STORAGE_KEY_MAP_STATE = "osm_barrier_view_state";
 
+  // 安定してJSONを返すエンドポイント順
   const OVERPASS_ENDPOINTS = [
     "https://overpass.kumi.systems/api/interpreter",
-    "https://overpass.osm.ch/api/interpreter",
-    "https://overpass-api.de/api/interpreter"
+    "https://overpass-api.de/api/interpreter",
+    "https://lz4.overpass-api.de/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.osm.ch/api/interpreter"
   ];
 
   let map = null;
@@ -223,10 +226,11 @@
   let markersLayer = null;
   let currentLocationMarker = null;
 
-  // メモリストア（静的JSONから読み込んだ全タイル情報）
   let tileStatsStore = new Map();
   let detailFeatureStore = new Map();
   let isFetchingDetail = false;
+  let detailAbortController = null;
+  let debounceTimer = null;
 
   function updateStatus(text, bg = "#e2e8f0", fg = "#475569") {
     const el = document.getElementById('status-badge');
@@ -281,37 +285,43 @@
     gridLayer = L.layerGroup().addTo(map);
     markersLayer = L.layerGroup().addTo(map);
 
-    map.on('zoomend', () => {
+    const onMapChange = () => {
       saveCurrentState();
-      handleMapChange();
-    });
-    map.on('moveend', () => {
-      saveCurrentState();
-      handleMapChange();
-    });
+      renderLayers();
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        if (map.getZoom() >= MAX_MAP_ZOOM) {
+          fetchDetailData();
+        }
+      }, 400);
+    };
 
-    document.getElementById('btn-reload').addEventListener('click', () => loadStaticTileData());
+    map.on('zoomend', onMapChange);
+    map.on('moveend', onMapChange);
+
+    document.getElementById('btn-reload').addEventListener('click', () => {
+      loadStaticTileData();
+      if (map.getZoom() >= MAX_MAP_ZOOM) fetchDetailData();
+    });
     document.getElementById('btn-locate').addEventListener('click', () => requestGeolocation(true));
     document.getElementById('btn-home').addEventListener('click', () => {
       map.setView(HOME_COORDS, DEFAULT_ZOOM);
       saveCurrentState();
-      handleMapChange();
+      renderLayers();
     });
 
-    // 1. 静的JSONファイルを即座にロード（CDNから一瞬で取得）
     await loadStaticTileData();
 
-    // 2. 位置情報確認
     if (!isReload) {
       requestGeolocation(false);
+    } else if (initZoom >= MAX_MAP_ZOOM) {
+      fetchDetailData();
     }
   }
 
-  // GitHub Pages上の静的JSONを一括読み込み
   async function loadStaticTileData() {
     updateStatus("CDNデータ読込中...", "#dbeafe", "#1d4ed8");
     try {
-      // キャッシュバスター (?t=) で最新データを確実に取得
       const res = await fetch(`./data/tiles.json?t=${Date.now()}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
@@ -329,13 +339,6 @@
     }
   }
 
-  function handleMapChange() {
-    renderLayers();
-    if (map.getZoom() >= MAX_MAP_ZOOM) {
-      fetchDetailData();
-    }
-  }
-
   function requestGeolocation(moveTo = false) {
     if (!navigator.geolocation) return;
 
@@ -346,7 +349,7 @@
         setCurMarker(lat, lng);
         map.setView([lat, lng], DEFAULT_ZOOM);
         saveCurrentState();
-        handleMapChange();
+        renderLayers();
       },
       (err) => console.warn(err),
       { enableHighAccuracy: false, timeout: 5000, maximumAge: 60000 }
@@ -489,16 +492,19 @@
     }
   }
 
-  // Zoom 19用 詳細取得（その時だけ局所的にOverpassを呼び出す）
+  /* --- Zoom 19: 個別地物取得 (安全なパースとフォールバック) --- */
   async function fetchDetailData() {
     if (isFetchingDetail) return;
     isFetchingDetail = true;
     updateStatus("地物詳細取得中...", "#dbeafe", "#1d4ed8");
 
+    if (detailAbortController) detailAbortController.abort();
+    detailAbortController = new AbortController();
+
     const bbox = map.getBounds();
     const s = bbox.getSouth(), w = bbox.getWest(), n = bbox.getNorth(), e = bbox.getEast();
 
-    const query = `[out:json][timeout:15];
+    const query = `[out:json][timeout:20];
 (
   node["barrier"="kerb"](${s},${w},${n},${e});
   node["kerb"](${s},${w},${n},${e});
@@ -510,17 +516,25 @@
 );
 out body;`;
 
+    let success = false;
+
     for (const endpoint of OVERPASS_ENDPOINTS) {
       try {
         const res = await fetch(endpoint, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
-          body: `data=${encodeURIComponent(query)}`
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
+          },
+          body: `data=${encodeURIComponent(query)}`,
+          signal: detailAbortController.signal
         });
-        if (!res.ok) continue;
+
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const text = await res.text();
-        if (text.trim().startsWith('<')) continue;
-        const data = JSON.parse(text);
+        const trimmed = text.trim();
+        if (trimmed.startsWith('<')) throw new Error('XML/HTML応答');
+
+        const data = JSON.parse(trimmed);
 
         if (data && Array.isArray(data.elements)) {
           data.elements.forEach(item => {
@@ -528,13 +542,17 @@ out body;`;
               detailFeatureStore.set(item.id, item);
             }
           });
+          success = true;
           break;
         }
-      } catch (err) {}
+      } catch (err) {
+        if (err.name === 'AbortError') return;
+        console.warn(`[Overpass Detail] ${endpoint} スキップ: ${err.message}`);
+      }
     }
 
     isFetchingDetail = false;
-    updateStatus("正常 (CDN)", "#dcfce7", "#15803d");
+    updateStatus(success ? "正常" : "詳細取得待機中", success ? "#dcfce7" : "#fef3c7", success ? "#15803d" : "#b45309");
     renderLayers();
   }
 
