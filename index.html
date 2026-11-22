@@ -78,6 +78,29 @@
     }
     .btn-primary:hover { background: #1d4ed8; }
 
+    /* グリッドタイル カウント表示ラベル */
+    .grid-count-label {
+      background: transparent;
+      border: none;
+      box-shadow: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .grid-count-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 20px;
+      height: 20px;
+      padding: 0 4px;
+      font-size: 12px;
+      font-weight: 800;
+      color: #ffffff;
+      text-shadow: 0 1px 2px rgba(0,0,0,0.8), 0 0 3px rgba(0,0,0,0.6);
+      pointer-events: none;
+    }
+
     /* アイコンピン (Zoom >= 16) */
     .poi-icon {
       display: flex;
@@ -107,9 +130,8 @@
     }
   </style>
 
-  <!-- Leaflet & Heatmap Scripts -->
+  <!-- Leaflet Scripts -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
 </head>
 <body>
 
@@ -135,8 +157,10 @@
   // 門司港駅
   const MOJIKO_COORDS = [33.9452, 130.9616];
   const SWITCH_ZOOM = 16;
+  const GRID_ROWS = 8;  // 縦8コマ
+  const GRID_COLS = 12; // 横12コマ
 
-  // 応答性の高いエンドポイント順（private.coffee / kumi を上位配置）
+  // Overpass API エンドポイント
   const OVERPASS_ENDPOINTS = [
     "https://overpass.private.coffee/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
@@ -145,7 +169,7 @@
     "https://overpass.osm.ch/api/interpreter"
   ];
 
-  // 万一のAPIダウン時にもヒートマップを表示する門司港駅周辺の初期シードデータ
+  // 門司港駅周辺シードデータ (フォールバック用)
   const MOJIKO_SEED_DATA = [
     { id: 'seed-1', lat: 33.9452, lon: 130.9616, tags: { name: "門司港駅", wheelchair: "yes" } },
     { id: 'seed-2', lat: 33.9455, lon: 130.9620, tags: { amenity: "toilets", "toilets:wheelchair": "yes" } },
@@ -154,11 +178,13 @@
     { id: 'seed-5', lat: 33.9468, lon: 130.9650, tags: { name: "門司港レトロ展望室", wheelchair: "yes", highway: "elevator" } },
     { id: 'seed-6', lat: 33.9472, lon: 130.9658, tags: { barrier: "kerb", kerb: "lowered" } },
     { id: 'seed-7', lat: 33.9442, lon: 130.9605, tags: { barrier: "kerb", kerb: "lowered" } },
-    { id: 'seed-8', lat: 33.9438, lon: 130.9598, tags: { amenity: "toilets", "toilets:wheelchair": "yes" } }
+    { id: 'seed-8', lat: 33.9438, lon: 130.9598, tags: { amenity: "toilets", "toilets:wheelchair": "yes" } },
+    { id: 'seed-9', lat: 33.9450, lon: 130.9625, tags: { barrier: "kerb", kerb: "lowered" } },
+    { id: 'seed-10', lat: 33.9458, lon: 130.9610, tags: { wheelchair: "yes" } }
   ];
 
   let map = null;
-  let heatLayer = null;
+  let gridLayer = null;
   let markersLayer = null;
   let currentLocationMarker = null;
   let featureStore = new Map();
@@ -187,16 +213,16 @@
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
     }).addTo(map);
 
+    gridLayer = L.layerGroup().addTo(map);
     markersLayer = L.layerGroup().addTo(map);
 
-    // シードデータを事前投入（API取得前またはエラー時でもヒートマップを描画可能にする）
+    // シードデータ初期登録
     MOJIKO_SEED_DATA.forEach(d => featureStore.set(d.id, d));
     renderLayers();
 
     map.on('zoomend', renderLayers);
     map.on('moveend', renderLayers);
 
-    // UIボタンイベント
     document.getElementById('btn-reload').addEventListener('click', () => fetchOverpassData());
     document.getElementById('btn-locate').addEventListener('click', () => requestGeolocation(true));
     document.getElementById('btn-mojiko').addEventListener('click', () => {
@@ -204,7 +230,6 @@
       fetchOverpassData();
     });
 
-    // 位置情報判定（※API fetchはここを起点に1回だけ実行）
     requestGeolocation(false);
   }
 
@@ -227,7 +252,7 @@
         fetchOverpassData();
       },
       (err) => {
-        console.warn(`Geolocation error: ${err.message}`);
+        console.warn(`Geolocation: ${err.message}`);
         updateStatus("門司港駅 (標準)", "#e2e8f0", "#475569");
         fetchOverpassData();
       },
@@ -277,7 +302,6 @@
 
     for (const endpoint of OVERPASS_ENDPOINTS) {
       try {
-        // クライアント側タイムアウトをサーバー制限に合わせて25秒に設定
         const res = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -307,6 +331,109 @@
     renderLayers();
   }
 
+  // 地物数に応じた透過カラー生成（青 -> シアン -> 黄 -> 赤）
+  function getTileColor(count, maxCount) {
+    if (count === 0) return { fill: 'transparent', fillOpacity: 0.0, stroke: 'rgba(148, 163, 184, 0.2)' };
+
+    const ratio = Math.min(count / Math.max(maxCount, 1), 1.0);
+    let r, g, b;
+
+    if (ratio <= 0.25) {
+      // 0.0 - 0.25: 深青 -> 水色
+      const t = ratio / 0.25;
+      r = Math.round(2 + t * (6 - 2));
+      g = Math.round(132 + t * (182 - 132));
+      b = Math.round(199 + t * (212 - 199));
+    } else if (ratio <= 0.6) {
+      // 0.25 - 0.6: 水色 -> 黄
+      const t = (ratio - 0.25) / 0.35;
+      r = Math.round(6 + t * (245 - 6));
+      g = Math.round(182 + t * (158 - 182));
+      b = Math.round(212 + t * (11 - 212));
+    } else {
+      // 0.6 - 1.0: 黄 -> 赤
+      const t = (ratio - 0.6) / 0.4;
+      r = Math.round(245 + t * (239 - 245));
+      g = Math.round(158 - t * 90);
+      b = Math.round(11 + t * (68 - 11));
+    }
+
+    const fillOpacity = 0.25 + ratio * 0.45; // 0.25 〜 0.70 の半透明
+    return {
+      fill: `rgb(${r}, ${g}, ${b})`,
+      fillOpacity: fillOpacity,
+      stroke: 'rgba(255, 255, 255, 0.45)'
+    };
+  }
+
+  // 画面を縦8×横12のグリッドタイルに分割してレンダリング
+  function renderGridHeatmap(elements) {
+    gridLayer.clearLayers();
+
+    const bounds = map.getBounds();
+    const south = bounds.getSouth();
+    const north = bounds.getNorth();
+    const west = bounds.getWest();
+    const east = bounds.getEast();
+
+    const latStep = (north - south) / GRID_ROWS;
+    const lngStep = (east - west) / GRID_COLS;
+
+    // 各セルの地物数を集計 (8 x 12)
+    const gridCounts = Array.from({ length: GRID_ROWS }, () => Array(GRID_COLS).fill(0));
+    let maxCellCount = 0;
+
+    elements.forEach(el => {
+      if (bounds.contains([el.lat, el.lon])) {
+        // 北から南(0〜7)、西から東(0〜11)
+        const row = Math.min(GRID_ROWS - 1, Math.max(0, Math.floor((north - el.lat) / latStep)));
+        const col = Math.min(GRID_COLS - 1, Math.max(0, Math.floor((el.lon - west) / lngStep)));
+        gridCounts[row][col]++;
+        if (gridCounts[row][col] > maxCellCount) {
+          maxCellCount = gridCounts[row][col];
+        }
+      }
+    });
+
+    // 各セルの矩形ポリゴンと中央カウントラベルを配置
+    for (let r = 0; r < GRID_ROWS; r++) {
+      for (let c = 0; c < GRID_COLS; c++) {
+        const cellNorth = north - r * latStep;
+        const cellSouth = cellNorth - latStep;
+        const cellWest = west + c * lngStep;
+        const cellEast = cellWest + lngStep;
+
+        const cellBounds = [[cellSouth, cellWest], [cellNorth, cellEast]];
+        const count = gridCounts[r][c];
+        const colorStyle = getTileColor(count, maxCellCount);
+
+        // 透過タイルポリゴン
+        L.rectangle(cellBounds, {
+          color: colorStyle.stroke,
+          weight: 1,
+          fillColor: colorStyle.fill,
+          fillOpacity: colorStyle.fillOpacity,
+          interactive: false
+        }).addTo(gridLayer);
+
+        // 地物があるセルの中央に対象地物数を表示
+        if (count > 0) {
+          const centerLat = cellSouth + latStep / 2;
+          const centerLng = cellWest + lngStep / 2;
+
+          const labelIcon = L.divIcon({
+            className: 'grid-count-label',
+            html: `<span class="grid-count-badge">${count}</span>`,
+            iconSize: [26, 20],
+            iconAnchor: [13, 10]
+          });
+
+          L.marker([centerLat, centerLng], { icon: labelIcon, interactive: false }).addTo(gridLayer);
+        }
+      }
+    }
+  }
+
   function renderLayers() {
     if (!map) return;
     const zoom = map.getZoom();
@@ -315,29 +442,14 @@
     document.getElementById('zoom-info').innerText = `ズーム: ${zoom}`;
     document.getElementById('count-info').innerText = `地物数: ${elements.length} 件`;
 
-    // ズーム16未満: ヒートマップ表示
+    // ズーム16未満: 縦8×横12 透過タイルヒートマップ
     if (zoom < SWITCH_ZOOM) {
       if (markersLayer) markersLayer.clearLayers();
-
-      const heatPoints = elements.map(el => [el.lat, el.lon, 1.0]);
-
-      if (heatLayer) {
-        heatLayer.setLatLngs(heatPoints);
-      } else if (typeof L.heatLayer === 'function') {
-        heatLayer = L.heatLayer(heatPoints, {
-          radius: 30,
-          blur: 18,
-          maxZoom: 15,
-          gradient: { 0.2: '#0284c7', 0.5: '#10b981', 0.8: '#f59e0b', 1.0: '#ef4444' }
-        }).addTo(map);
-      }
+      renderGridHeatmap(elements);
     }
-    // ズーム16以上: 個別ピン強調表示
+    // ズーム16以上: 個別地物強調ピン
     else {
-      if (heatLayer) {
-        map.removeLayer(heatLayer);
-        heatLayer = null;
-      }
+      if (gridLayer) gridLayer.clearLayers();
 
       if (markersLayer) {
         markersLayer.clearLayers();
@@ -390,7 +502,6 @@
     return marker;
   }
 
-  // 初期化実行
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initMap);
   } else {
