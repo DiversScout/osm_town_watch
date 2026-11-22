@@ -4,307 +4,63 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>バリアフリー情報可視化マップ (OSM)</title>
-  
+
   <!-- Leaflet CSS -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
-  
+
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body, #map { width: 100%; height: 100%; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
-    
-    /* コントロールUI */
-    .control-panel {
-      position: absolute;
-      top: 12px;
-      left: 12px;
-      right: 12px;
-      max-width: 420px;
+
+    /* UI パネル共通 */
+    .glass-panel {
       background: rgba(255, 255, 255, 0.95);
-      backdrop-filter: blur(4px);
-      padding: 12px 14px;
+      backdrop-filter: blur(6px);
       border-radius: 12px;
-      box-shadow: 0 4px 14px rgba(0,0,0,0.18);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+      border: 1px solid rgba(226, 232, 240, 0.8);
       z-index: 1000;
     }
-    .panel-header {
+
+    /* 上部ステータスパネル */
+    .top-panel {
+      position: absolute;
+      top: 14px;
+      left: 14px;
+      padding: 10px 14px;
       display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 6px;
+      flex-direction: column;
+      gap: 4px;
     }
-    .panel-title {
-      font-size: 15px;
+    .top-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .app-icon {
+      width: 28px;
+      height: 28px;
+      background: #2563eb;
+      color: #fff;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+    }
+    .app-title {
+      font-size: 14px;
       font-weight: 700;
       color: #1e293b;
     }
-    .status-badge {
+    .app-subtitle {
       font-size: 11px;
-      padding: 2px 8px;
-      border-radius: 9999px;
-      background: #e2e8f0;
-      color: #475569;
-      font-weight: 600;
-    }
-    .panel-meta {
-      font-size: 12px;
       color: #64748b;
-      margin-bottom: 8px;
-      display: flex;
-      justify-content: space-between;
     }
-    .btn-group {
-      display: flex;
-      gap: 6px;
-    }
-    .btn {
-      flex: 1;
-      padding: 7px 10px;
-      font-size: 12px;
-      font-weight: 600;
-      border: 1px solid #cbd5e1;
-      border-radius: 6px;
-      background: #ffffff;
-      color: #334155;
-      cursor: pointer;
+    .stats-row {
       display: flex;
       align-items: center;
-      justify-content: center;
-      gap: 4px;
-      transition: background 0.15s, border-color 0.15s;
-    }
-    .btn:hover { background: #f8fafc; border-color: #94a3b8; }
-    .btn-primary {
-      background: #2563eb;
-      color: #ffffff;
-      border-color: #2563eb;
-    }
-    .btn-primary:hover { background: #1d4ed8; }
-
-    /* アイコンピン */
-    .custom-poi-icon {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      width: 28px !important;
-      height: 28px !important;
-      border-radius: 50%;
-      border: 2px solid #ffffff;
-      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
-      font-size: 14px;
-      color: #ffffff;
-    }
-    .poi-wheelchair { background-color: #0284c7; }
-    .poi-elevator   { background-color: #16a34a; }
-    .poi-toilet     { background-color: #ea580c; }
-    .poi-kerb       { background-color: #9333ea; }
-
-    /* 現在地ピン */
-    .current-loc-marker {
-      width: 14px;
-      height: 14px;
-      border-radius: 50%;
-      background-color: #2563eb;
-      border: 2px solid #ffffff;
-      box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.35);
-    }
-  </style>
-</head>
-<body>
-
-<div id="map"></div>
-
-<div class="control-panel">
-  <div class="panel-header">
-    <div class="panel-title">バリアフリー情報可視化</div>
-    <div id="status-badge" class="status-badge">初期化中</div>
-  </div>
-  <div class="panel-meta">
-    <span id="zoom-info">ズーム: --</span>
-    <span id="count-info">地物数: 0 件</span>
-  </div>
-  <div class="btn-group">
-    <button class="btn btn-primary" id="btn-reload" onclick="fetchOverpassData(true)">現在エリアで再取得</button>
-    <button class="btn" id="btn-locate" onclick="moveToCurrentLocation()">現在地へ移動</button>
-    <button class="btn" onclick="moveToMojiko()">門司港駅へ</button>
-  </div>
-</div>
-
-<!-- Leaflet & Leaflet.heat -->
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-<script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
-
-<script>
-  // 門司港駅
-  const MOJIKO_COORDS = [33.9452, 130.9616];
-  const SWITCH_ZOOM_LEVEL = 16; // 16未満はヒートマップ、16以上は地物個別表示
-
-  // Overpass API エンドポイント冗長構成
-  const OVERPASS_ENDPOINTS = [
-    "https://overpass-api.de/api/interpreter",
-    "https://lz4.overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-    "https://overpass.osm.ch/api/interpreter"
-  ];
-
-  let map;
-  let heatLayer = null;
-  let markersLayer = L.layerGroup();
-  let currentLocationMarker = null;
-  let cachedElements = new Map(); // 重複排除キャッシュ
-  let isFetching = false;
-
-  // 初期化
-  function initMap() {
-    map = L.map('map', {
-      center: MOJIKO_COORDS,
-      zoom: 15,
-      zoomControl: false
-    });
-
-    L.control.zoom({ position: 'bottomright' }).addTo(map);
-
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-    }).addTo(map);
-
-    markersLayer.addTo(map);
-
-    // イベントリスナー
-    map.on('zoomend', updateDisplayLayers);
-    map.on('moveend', () => {
-      updateDisplayLayers();
-    });
-
-    // 位置情報取得（タイムアウトを5秒に緩和・高精度オフで安定化）
-    requestGeolocation();
-
-    // 初回データ取得
-    fetchOverpassData();
-  }
-
-  // 位置情報リクエスト
-  function requestGeolocation() {
-    if (!navigator.geolocation) return;
-
-    setStatus("現在地取得中...", "#d97706");
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const lat = pos.coords.latitude;
-        const lng = pos.coords.longitude;
-        setCurrentLocationPin(lat, lng);
-        map.setView([lat, lng], 16);
-        setStatus("現在地表示中", "#16a34a");
-        fetchOverpassData();
-      },
-      (err) => {
-        // タイムアウトや拒否時は門司港デフォルトを維持
-        console.warn(`Geolocation: ${err.message} (デフォルト表示を維持します)`);
-        setStatus("門司港駅 (標準)", "#475569");
-      },
-      {
-        enableHighAccuracy: false, // バッテリー節約・高速判定
-        timeout: 5000,
-        maximumAge: 60000
-      }
-    );
-  }
-
-  function setCurrentLocationPin(lat, lng) {
-    if (currentLocationMarker) {
-      currentLocationMarker.setLatLng([lat, lng]);
-    } else {
-      const locIcon = L.divIcon({
-        className: 'current-loc-marker',
-        iconSize: [14, 14],
-        iconAnchor: [7, 7]
-      });
-      currentLocationMarker = L.marker([lat, lng], { icon: locIcon }).addTo(map);
-    }
-  }
-
-  function moveToCurrentLocation() {
-    requestGeolocation();
-  }
-
-  function moveToMojiko() {
-    map.setView(MOJIKO_COORDS, 16);
-  }
-
-  function setStatus(text, color = "#475569") {
-    const el = document.getElementById('status-badge');
-    el.innerText = text;
-    el.style.backgroundColor = color;
-    el.style.color = "#ffffff";
-  }
-
-  // Overpass QL クエリ生成
-  function buildOverpassQuery(bbox) {
-    const s = bbox.getSouth();
-    const w = bbox.getWest();
-    const n = bbox.getNorth();
-    const e = bbox.getEast();
-
-    return `
-      [out:json][timeout:20];
-      (
-        node["wheelchair"](${s},${w},${n},${e});
-        node["highway"="elevator"](${s},${w},${n},${e});
-        node["toilets:wheelchair"](${s},${w},${n},${e});
-        node["barrier"="kerb"](${s},${w},${n},${e});
-      );
-      out body;
-    `;
-  }
-
-  // フォールバック付きOverpassリクエスト
-  async function fetchOverpassData(force = false) {
-    if (isFetching) return;
-    isFetching = true;
-    setStatus("データ取得中...", "#2563eb");
-
-    const bbox = map.getBounds();
-    const query = buildOverpassQuery(bbox);
-    let success = false;
-
-    for (let endpoint of OVERPASS_ENDPOINTS) {
-      try {
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: `data=${encodeURIComponent(query)}`,
-          signal: AbortSignal.timeout(12000)
-        });
-
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const data = await response.json();
-
-        // 取得成功：データをマップに蓄積
-        if (data && data.elements) {
-          data.elements.forEach(item => {
-            if (item.lat && item.lon) {
-              cachedElements.set(item.id, item);
-            }
-          });
-        }
-        success = true;
-        break;
-      } catch (err) {
-        console.warn(`Endpoint failed [${endpoint}]:`, err.message);
-      }
-    }
-
-    isFetching = false;
-    if (success) {
-      setStatus("正常", "#16a34a");
-      updateDisplayLayers();
-    } else {
-      setStatus("取得失敗(キャッシュ表示)", "#dc2626");
-      updateDisplayLayers();
-    }
-  }
-
-  // ズームに応じたヒートマップ / 個別ピンの切り替え
-  function updateDisplayLayers() {
-    const currentZoom = map.getZoom();
-    document.getElementById('zoom-info').innerText = `ズーム: ${currentZoom}`;
+      gap: 12px;
+      font-size: 11px;
+      color: #475569;
+      margin-top: 4px
