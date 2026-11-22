@@ -155,14 +155,15 @@
 </div>
 
 <script>
-  // 門司港駅（デフォルト中心位置）
+  // 門司港駅
   const MOJIKO_COORDS = [33.9452, 130.9616];
   const MAX_MAP_ZOOM = 19;
+  const TILE_BASE_ZOOM = 16; // 約600m四方の固定タイル単位
 
-  // タイルの固定基準ズームレベル (Zoom 16相当: 緯度34度付近で約500〜600m四方の固定区画)
-  const TILE_BASE_ZOOM = 16;
+  // セッションストレージキー
+  const STORAGE_KEY_MAP_STATE = "osm_barrier_view_state";
 
-  // OSM Wiki掲載インスタンスからHTTPS/CORS/安定性順に選定
+  // OSM Wiki掲載インスタンス（HTTPS/CORS/安定性順）
   const OVERPASS_ENDPOINTS = [
     "https://overpass.osm.ch/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
@@ -187,17 +188,50 @@
     el.style.color = fg;
   }
 
+  // セッションから前回の表示状態を取得
+  function getSavedState() {
+    try {
+      const data = sessionStorage.getItem(STORAGE_KEY_MAP_STATE);
+      return data ? JSON.parse(data) : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // 地図移動時に現在の中心座標とズームをセッションに退避
+  function saveCurrentState() {
+    if (!map) return;
+    try {
+      const center = map.getCenter();
+      const state = {
+        lat: center.lat,
+        lng: center.lng,
+        zoom: map.getZoom()
+      };
+      sessionStorage.setItem(STORAGE_KEY_MAP_STATE, JSON.stringify(state));
+    } catch (e) {
+      console.warn("sessionStorage save failed:", e);
+    }
+  }
+
   function initMap() {
+    const savedState = getSavedState();
+    const isReload = !!savedState;
+
+    // リロード時は前回の座標・ズームを適用、初回は門司港駅
+    const initCenter = isReload ? [savedState.lat, savedState.lng] : MOJIKO_COORDS;
+    const initZoom = isReload ? savedState.zoom : 16;
+
     map = L.map('map', {
-      center: MOJIKO_COORDS,
-      zoom: 16,
+      center: initCenter,
+      zoom: initZoom,
       maxZoom: MAX_MAP_ZOOM,
       zoomControl: false
     });
 
     L.control.zoom({ position: 'topright' }).addTo(map);
 
-    // OpenStreetMap 公式標準タイル
+    // OpenStreetMap 公式タイル
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: MAX_MAP_ZOOM,
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
@@ -206,17 +240,32 @@
     gridLayer = L.layerGroup().addTo(map);
     markersLayer = L.layerGroup().addTo(map);
 
-    map.on('zoomend', renderLayers);
-    map.on('moveend', renderLayers);
+    // 画面操作時にレイヤー再計算および座標保存
+    map.on('zoomend', () => {
+      saveCurrentState();
+      renderLayers();
+    });
+    map.on('moveend', () => {
+      saveCurrentState();
+      renderLayers();
+    });
 
     document.getElementById('btn-reload').addEventListener('click', () => fetchOverpassData());
     document.getElementById('btn-locate').addEventListener('click', () => requestGeolocation(true));
     document.getElementById('btn-mojiko').addEventListener('click', () => {
       map.setView(MOJIKO_COORDS, 19);
+      saveCurrentState();
       fetchOverpassData();
     });
 
-    requestGeolocation(false);
+    if (isReload) {
+      // リロード時: 前回の位置を維持したまま、該当エリアのOverpassデータを再取得
+      updateStatus("リロード復元", "#e0e7ff", "#3730a3");
+      fetchOverpassData();
+    } else {
+      // 初回セッション時のみ: 現在地判定を試行
+      requestGeolocation(false);
+    }
   }
 
   function requestGeolocation(moveTo = false) {
@@ -234,6 +283,7 @@
         const lng = pos.coords.longitude;
         setCurMarker(lat, lng);
         map.setView([lat, lng], 19);
+        saveCurrentState();
         updateStatus("現在地表示中", "#dcfce7", "#15803d");
         fetchOverpassData();
       },
@@ -346,7 +396,6 @@ out body;`;
     return [[Math.min(lat1, lat2), lon1], [Math.max(lat1, lat2), lon2]];
   }
 
-  // 地物数に応じた透過グラデーションカラー算出
   function getTileColor(count, maxCount) {
     if (count === 0) return { fill: 'transparent', fillOpacity: 0.0, stroke: 'rgba(148, 163, 184, 0.25)' };
 
@@ -378,7 +427,6 @@ out body;`;
     };
   }
 
-  // 固定地理グリッドヒートマップ描画 (Zoom 16基準の固定区画)
   function renderFixedGridHeatmap(elements) {
     gridLayer.clearLayers();
 
@@ -391,7 +439,6 @@ out body;`;
     const minY = Math.min(nwTile.y, seTile.y);
     const maxY = Math.max(nwTile.y, seTile.y);
 
-    // 画面内に存在する固定タイルごとに地物数を集計
     const tileCounts = new Map();
     let maxCellCount = 0;
 
@@ -407,7 +454,6 @@ out body;`;
       }
     });
 
-    // 画面内の各タイル区画を描画
     for (let x = minX; x <= maxX; x++) {
       for (let y = minY; y <= maxY; y++) {
         const cellBounds = tileToLatLngBounds(x, y, TILE_BASE_ZOOM);
@@ -448,12 +494,12 @@ out body;`;
     document.getElementById('zoom-info').innerText = `ズーム: ${zoom} / 最大:${MAX_MAP_ZOOM}`;
     document.getElementById('count-info').innerText = `地物数: ${elements.length} 件`;
 
-    // 最大ズーム未満 (Zoom < 19): 固定サイズ透過タイルヒートマップ
+    // Zoom < 19: 固定サイズ透過タイルヒートマップ
     if (zoom < MAX_MAP_ZOOM) {
       if (markersLayer) markersLayer.clearLayers();
       renderFixedGridHeatmap(elements);
     }
-    // 最大ズーム (Zoom 19): 個別地物アイコン強調表示
+    // Zoom 19: 個別地物アイコン強調表示
     else {
       if (gridLayer) gridLayer.clearLayers();
 
