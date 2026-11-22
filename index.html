@@ -79,7 +79,7 @@
     }
     .btn-primary:hover { background: #1d4ed8; }
 
-    /* グリッドタイル中央の件数ラベル */
+    /* 固定グリッドタイル中央の件数ラベル */
     .grid-count-label {
       background: transparent;
       border: none;
@@ -92,10 +92,10 @@
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      min-width: 22px;
-      height: 22px;
+      min-width: 24px;
+      height: 24px;
       padding: 0 4px;
-      font-size: 12px;
+      font-size: 13px;
       font-weight: 800;
       color: #ffffff;
       text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8), 0 0 4px rgba(0, 0, 0, 0.7);
@@ -158,16 +158,17 @@
   // 門司港駅（デフォルト中心位置）
   const MOJIKO_COORDS = [33.9452, 130.9616];
   const MAX_MAP_ZOOM = 19;
-  const GRID_ROWS = 8;  // 画面縦8コマ
-  const GRID_COLS = 12; // 画面横12コマ
 
-  // OSM Wiki掲載インスタンスから、HTTPS・CORS対応・低負荷順に選定したエンドポイント
+  // タイルの固定基準ズームレベル (Zoom 16相当: 緯度34度付近で約500〜600m四方の固定区画)
+  const TILE_BASE_ZOOM = 16;
+
+  // OSM Wiki掲載インスタンスからHTTPS/CORS/安定性順に選定
   const OVERPASS_ENDPOINTS = [
-    "https://overpass.osm.ch/api/interpreter",          // スイス（低負荷・高速）
-    "https://overpass.kumi.systems/api/interpreter",    // Kumi Systems
-    "https://overpass.private.coffee/api/interpreter",  // コミュニティミラー
-    "https://overpass-api.de/api/interpreter",          // メイン（混雑時はフォールバック）
-    "https://lz4.overpass-api.de/api/interpreter"       // メイン予備
+    "https://overpass.osm.ch/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass-api.de/api/interpreter",
+    "https://lz4.overpass-api.de/api/interpreter"
   ];
 
   let map = null;
@@ -196,7 +197,7 @@
 
     L.control.zoom({ position: 'topright' }).addTo(map);
 
-    // OpenStreetMap 公式タイル
+    // OpenStreetMap 公式標準タイル
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: MAX_MAP_ZOOM,
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
@@ -215,7 +216,6 @@
       fetchOverpassData();
     });
 
-    // 初回ロード時の現在地判定
     requestGeolocation(false);
   }
 
@@ -323,9 +323,32 @@ out body;`;
     renderLayers();
   }
 
+  /* --- Webメルカトル固定タイルの座標計算関数 --- */
+  function latLngToTile(lat, lng, zoom) {
+    const latRad = (lat * Math.PI) / 180;
+    const n = Math.pow(2, zoom);
+    const x = Math.floor(((lng + 180) / 360) * n);
+    const y = Math.floor((1 - Math.asinh(Math.tan(latRad)) / Math.PI) / 2 * n);
+    return { x, y };
+  }
+
+  function tileToLatLngBounds(x, y, zoom) {
+    const n = Math.pow(2, zoom);
+    const lon1 = (x / n) * 360 - 180;
+    const lon2 = ((x + 1) / n) * 360 - 180;
+
+    const latRad1 = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n)));
+    const latRad2 = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 1) / n)));
+
+    const lat1 = (latRad1 * 180) / Math.PI;
+    const lat2 = (latRad2 * 180) / Math.PI;
+
+    return [[Math.min(lat1, lat2), lon1], [Math.max(lat1, lat2), lon2]];
+  }
+
   // 地物数に応じた透過グラデーションカラー算出
   function getTileColor(count, maxCount) {
-    if (count === 0) return { fill: 'transparent', fillOpacity: 0.0, stroke: 'rgba(148, 163, 184, 0.2)' };
+    if (count === 0) return { fill: 'transparent', fillOpacity: 0.0, stroke: 'rgba(148, 163, 184, 0.25)' };
 
     const ratio = Math.min(count / Math.max(maxCount, 1), 1.0);
     let r, g, b;
@@ -347,50 +370,49 @@ out body;`;
       b = Math.round(11 + t * (68 - 11));
     }
 
-    const fillOpacity = 0.25 + ratio * 0.45;
+    const fillOpacity = 0.30 + ratio * 0.45;
     return {
       fill: `rgb(${r}, ${g}, ${b})`,
       fillOpacity: fillOpacity,
-      stroke: 'rgba(255, 255, 255, 0.45)'
+      stroke: 'rgba(255, 255, 255, 0.55)'
     };
   }
 
-  // 画面内を縦8×横12に分割してグリッド描画
-  function renderGridHeatmap(elements) {
+  // 固定地理グリッドヒートマップ描画 (Zoom 16基準の固定区画)
+  function renderFixedGridHeatmap(elements) {
     gridLayer.clearLayers();
 
     const bounds = map.getBounds();
-    const south = bounds.getSouth();
-    const north = bounds.getNorth();
-    const west = bounds.getWest();
-    const east = bounds.getEast();
+    const nwTile = latLngToTile(bounds.getNorth(), bounds.getWest(), TILE_BASE_ZOOM);
+    const seTile = latLngToTile(bounds.getSouth(), bounds.getEast(), TILE_BASE_ZOOM);
 
-    const latStep = (north - south) / GRID_ROWS;
-    const lngStep = (east - west) / GRID_COLS;
+    const minX = Math.min(nwTile.x, seTile.x);
+    const maxX = Math.max(nwTile.x, seTile.x);
+    const minY = Math.min(nwTile.y, seTile.y);
+    const maxY = Math.max(nwTile.y, seTile.y);
 
-    const gridCounts = Array.from({ length: GRID_ROWS }, () => Array(GRID_COLS).fill(0));
+    // 画面内に存在する固定タイルごとに地物数を集計
+    const tileCounts = new Map();
     let maxCellCount = 0;
 
     elements.forEach(el => {
       if (bounds.contains([el.lat, el.lon])) {
-        const row = Math.min(GRID_ROWS - 1, Math.max(0, Math.floor((north - el.lat) / latStep)));
-        const col = Math.min(GRID_COLS - 1, Math.max(0, Math.floor((el.lon - west) / lngStep)));
-        gridCounts[row][col]++;
-        if (gridCounts[row][col] > maxCellCount) {
-          maxCellCount = gridCounts[row][col];
+        const t = latLngToTile(el.lat, el.lon, TILE_BASE_ZOOM);
+        const key = `${t.x}_${t.y}`;
+        const current = (tileCounts.get(key) || 0) + 1;
+        tileCounts.set(key, current);
+        if (current > maxCellCount) {
+          maxCellCount = current;
         }
       }
     });
 
-    for (let r = 0; r < GRID_ROWS; r++) {
-      for (let c = 0; c < GRID_COLS; c++) {
-        const cellNorth = north - r * latStep;
-        const cellSouth = cellNorth - latStep;
-        const cellWest = west + c * lngStep;
-        const cellEast = cellWest + lngStep;
-
-        const cellBounds = [[cellSouth, cellWest], [cellNorth, cellEast]];
-        const count = gridCounts[r][c];
+    // 画面内の各タイル区画を描画
+    for (let x = minX; x <= maxX; x++) {
+      for (let y = minY; y <= maxY; y++) {
+        const cellBounds = tileToLatLngBounds(x, y, TILE_BASE_ZOOM);
+        const key = `${x}_${y}`;
+        const count = tileCounts.get(key) || 0;
         const colorStyle = getTileColor(count, maxCellCount);
 
         L.rectangle(cellBounds, {
@@ -402,14 +424,14 @@ out body;`;
         }).addTo(gridLayer);
 
         if (count > 0) {
-          const centerLat = cellSouth + latStep / 2;
-          const centerLng = cellWest + lngStep / 2;
+          const centerLat = (cellBounds[0][0] + cellBounds[1][0]) / 2;
+          const centerLng = (cellBounds[0][1] + cellBounds[1][1]) / 2;
 
           const labelIcon = L.divIcon({
             className: 'grid-count-label',
             html: `<span class="grid-count-badge">${count}</span>`,
-            iconSize: [26, 20],
-            iconAnchor: [13, 10]
+            iconSize: [26, 24],
+            iconAnchor: [13, 12]
           });
 
           L.marker([centerLat, centerLng], { icon: labelIcon, interactive: false }).addTo(gridLayer);
@@ -426,10 +448,10 @@ out body;`;
     document.getElementById('zoom-info').innerText = `ズーム: ${zoom} / 最大:${MAX_MAP_ZOOM}`;
     document.getElementById('count-info').innerText = `地物数: ${elements.length} 件`;
 
-    // 最大ズーム未満 (Zoom < 19): 縦8×横12のグリッドヒートマップ
+    // 最大ズーム未満 (Zoom < 19): 固定サイズ透過タイルヒートマップ
     if (zoom < MAX_MAP_ZOOM) {
       if (markersLayer) markersLayer.clearLayers();
-      renderGridHeatmap(elements);
+      renderFixedGridHeatmap(elements);
     }
     // 最大ズーム (Zoom 19): 個別地物アイコン強調表示
     else {
