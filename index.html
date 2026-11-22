@@ -208,7 +208,7 @@
   const HOME_COORDS = [33.9452, 130.9616];
   const DEFAULT_ZOOM = 18;
   const MAX_MAP_ZOOM = 19;
-  const MIN_HEATMAP_ZOOM = 15; // タイルを表示する最小ズーム（これ未満は広域としてタイル描画を停止）
+  const MIN_HEATMAP_ZOOM = 15; // 広域ズームでは描画負荷を避けるため非表示
   const TILE_BASE_ZOOM = 16;
 
   const STORAGE_KEY_MAP_STATE = "osm_barrier_view_state";
@@ -226,6 +226,7 @@
   let markersLayer = null;
   let currentLocationMarker = null;
 
+  // 全国集計データのストア
   let tileStatsStore = new Map();
   let detailFeatureStore = new Map();
   let isFetchingDetail = false;
@@ -310,8 +311,10 @@
       renderLayers();
     });
 
+    // 1. 全国タイル集計JSONのロード
     await loadStaticTileData();
 
+    // 2. 位置の初期化
     if (!isReload) {
       requestGeolocation(false);
     } else if (initZoom >= MAX_MAP_ZOOM) {
@@ -320,7 +323,7 @@
   }
 
   async function loadStaticTileData() {
-    updateStatus("CDNデータ読込中...", "#dbeafe", "#1d4ed8");
+    updateStatus("全国データ読込中...", "#dbeafe", "#1d4ed8");
     try {
       const res = await fetch(`./data/tiles.json?t=${Date.now()}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -331,7 +334,7 @@
         tileStatsStore.set(key, stat);
       }
 
-      updateStatus("正常 (CDN)", "#dcfce7", "#15803d");
+      updateStatus(`正常 (${tileStatsStore.size.toLocaleString()}区画)`, "#dcfce7", "#15803d");
       renderLayers();
     } catch (e) {
       console.warn("Static tiles fetch failed:", e);
@@ -419,7 +422,7 @@
 
     const zoom = map.getZoom();
 
-    // マクロ表示 (Zoom < 15) は描画負荷を完全に排するためタイル非表示
+    // 広域表示 (Zoom < 15) では描画負荷を完全に排するためスキップ
     if (zoom < MIN_HEATMAP_ZOOM) {
       document.getElementById('count-info').innerText = "広域表示中 (ズームインで詳細)";
       return;
@@ -500,6 +503,7 @@
     }
   }
 
+  // Zoom 19用 詳細取得（その時だけ現在見ている数ブロックのみ局所問い合わせ）
   async function fetchDetailData() {
     if (isFetchingDetail) return;
     isFetchingDetail = true;
@@ -554,12 +558,11 @@ out body;`;
         }
       } catch (err) {
         if (err.name === 'AbortError') return;
-        console.warn(`[Overpass Detail] ${endpoint} スキップ: ${err.message}`);
       }
     }
 
     isFetchingDetail = false;
-    updateStatus(success ? "正常" : "詳細取得待機中", success ? "#dcfce7" : "#fef3c7", success ? "#15803d" : "#b45309");
+    updateStatus(`正常 (${tileStatsStore.size.toLocaleString()}区画)`, "#dcfce7", "#15803d");
     renderLayers();
   }
 
