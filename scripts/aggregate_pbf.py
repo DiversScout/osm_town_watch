@@ -14,66 +14,67 @@ def lat_lng_to_tile(lat, lng, zoom):
     y = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
     return x, y
 
-def is_registered(tags):
-    # 縁石 (kerb)
-    if tags.get("barrier") == "kerb" or "kerb" in tags:
-        k = tags.get("kerb", "")
-        if k and k != "unknown":
-            return True
-    # エレベーター
-    if tags.get("highway") == "elevator":
-        return True
-    # 車椅子タグ
-    if tags.get("wheelchair") in ["yes", "limited", "no"]:
-        return True
-    # 車椅子対応トイレ
-    if tags.get("toilets:wheelchair") in ["yes", "limited", "no"]:
-        return True
-    return False
-
-def is_target_feature(tags):
-    if "barrier" in tags and tags["barrier"] == "kerb":
-        return True
-    if "kerb" in tags:
-        return True
-    if tags.get("highway") in ["crossing", "elevator"]:
-        return True
-    if "shop" in tags or "amenity" in tags:
-        return True
-    if "wheelchair" in tags or "toilets:wheelchair" in tags:
-        return True
-    return False
-
 class BarrierTileHandler(osmium.SimpleHandler):
     def __init__(self):
         super().__init__()
         self.tile_stats = {}
-        self.processed_nodes = 0
-        self.matched_features = 0
+        self.processed = 0
+        self.matched = 0
 
     def node(self, n):
-        self.processed_nodes += 1
+        self.processed += 1
         tags = n.tags
-
-        if not is_target_feature(tags):
+        
+        # タグが存在しないノードは即スキップ（OSMの大半は道路形状ノード等のタグなしノード）
+        if not tags:
             return
 
-        if not n.location.valid():
+        # 対象地物かどうかのクイック判定
+        is_target = False
+        if "barrier" in tags and tags["barrier"] == "kerb":
+            is_target = True
+        elif "kerb" in tags:
+            is_target = True
+        elif tags.get("highway") in ("crossing", "elevator"):
+            is_target = True
+        elif "shop" in tags or "amenity" in tags:
+            is_target = True
+        elif "wheelchair" in tags or "toilets:wheelchair" in tags:
+            is_target = True
+
+        if not is_target:
             return
 
-        self.matched_features += 1
-        lat = n.location.lat
-        lon = n.location.lon
+        loc = n.location
+        if not loc.valid():
+            return
+
+        self.matched += 1
+        lat = loc.lat
+        lon = loc.lon
+
+        # 登録状況判定
+        is_reg = False
+        if tags.get("barrier") == "kerb" or "kerb" in tags:
+            k = tags.get("kerb", "")
+            if k and k != "unknown":
+                is_reg = True
+        elif tags.get("highway") == "elevator":
+            is_reg = True
+        elif tags.get("wheelchair") in ("yes", "limited", "no"):
+            is_reg = True
+        elif tags.get("toilets:wheelchair") in ("yes", "limited", "no"):
+            is_reg = True
 
         x, y = lat_lng_to_tile(lat, lon, TILE_BASE_ZOOM)
         key = f"{x}_{y}"
 
         if key not in self.tile_stats:
-            self.tile_stats[key] = {"total": 0, "tagged": 0}
+            self.tile_stats[key] = [0, 0] # [total, tagged] 配列でメモリ節約
 
-        self.tile_stats[key]["total"] += 1
-        if is_registered(tags):
-            self.tile_stats[key]["tagged"] += 1
+        self.tile_stats[key][0] += 1
+        if is_reg:
+            self.tile_stats[key][1] += 1
 
 def main():
     if len(sys.argv) < 2:
@@ -85,30 +86,35 @@ def main():
         print(f"Error: File not found: {pbf_file}")
         sys.exit(1)
 
-    print(f"Start processing {pbf_file}...")
+    print(f"Start processing: {pbf_file}")
     start_time = time.time()
 
     handler = BarrierTileHandler()
-    # locations=True でノード座標を直接取得
     handler.apply_file(pbf_file, locations=True)
 
     elapsed = time.time() - start_time
-    print(f"Processed {handler.processed_nodes} nodes in {elapsed:.1f}s.")
-    print(f"Matched {handler.matched_features} barrier-related features across {len(handler.tile_stats)} tiles.")
+    print(f"Processed: {handler.processed:,} nodes in {elapsed:.1f}s.")
+    print(f"Matched: {handler.matched:,} features in {len(handler.tile_stats):,} tiles.")
 
     os.makedirs("data", exist_ok=True)
     out_path = os.path.join("data", "tiles.json")
 
+    # JSON出力形式に変換
+    formatted_tiles = {
+        k: {"total": v[0], "tagged": v[1]}
+        for k, v in handler.tile_stats.items()
+    }
+
     payload = {
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "base_zoom": TILE_BASE_ZOOM,
-        "tiles": handler.tile_stats
+        "tiles": formatted_tiles
     }
 
     with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False)
+        json.dump(payload, f, separators=(',', ':')) # 空白を除去してファイルサイズ圧縮
 
-    print(f"Saved nationwide tile summary to {out_path}")
+    print(f"Saved: {out_path} ({os.path.getsize(out_path) / (1024*1024):.2f} MB)")
 
 if __name__ == "__main__":
     main()
