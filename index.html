@@ -12,7 +12,6 @@
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body, #map { width: 100%; height: 100%; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
 
-    /* UI コントロールパネル */
     .control-panel {
       position: absolute;
       top: 14px;
@@ -53,7 +52,6 @@
       justify-content: space-between;
     }
 
-    /* 凡例表示 */
     .legend-row {
       display: flex;
       gap: 10px;
@@ -110,7 +108,6 @@
     }
     .btn-primary:hover { background: #1d4ed8; }
 
-    /* 固定グリッドタイル中央のバッジ */
     .grid-count-label {
       background: transparent;
       border: none;
@@ -143,7 +140,6 @@
       line-height: 1.1;
     }
 
-    /* アイコンピン共通基底 */
     .poi-icon {
       display: flex;
       align-items: center;
@@ -153,7 +149,6 @@
       font-size: 13px;
       color: #ffffff;
       box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
-      transition: transform 0.1s;
     }
     .shape-registered {
       border-radius: 50%;
@@ -169,7 +164,6 @@
     .color-blocked  { background-color: #dc2626; }
     .color-unknown  { background-color: #64748b; }
 
-    /* 現在地ピン */
     .current-loc-marker {
       width: 14px;
       height: 14px;
@@ -180,7 +174,6 @@
     }
   </style>
 
-  <!-- Leaflet -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 </head>
 <body>
@@ -215,19 +208,20 @@
   const HOME_COORDS = [33.9452, 130.9616];
   const DEFAULT_ZOOM = 18;
   const MAX_MAP_ZOOM = 19;
-  const TILE_BASE_ZOOM = 16; // 固定グリッド基準ズーム
+  const TILE_BASE_ZOOM = 16;
 
-  // キャッシュ有効期限: 3日間 (ミリ秒)
+  // 3日間TTL
   const CACHE_TTL_MS = 3 * 24 * 60 * 60 * 1000;
   const STORAGE_KEY_MAP_STATE = "osm_barrier_view_state";
   const STORAGE_PREFIX_TILE = "osm_tile_z16_";
 
+  // 最も応答の安定しているサーバー順
   const OVERPASS_ENDPOINTS = [
     "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.osm.ch/api/interpreter",
     "https://overpass-api.de/api/interpreter",
     "https://lz4.overpass-api.de/api/interpreter",
-    "https://overpass.private.coffee/api/interpreter",
-    "https://overpass.osm.ch/api/interpreter"
+    "https://overpass.private.coffee/api/interpreter"
   ];
 
   let map = null;
@@ -235,12 +229,12 @@
   let markersLayer = null;
   let currentLocationMarker = null;
 
-  // メモリストア
-  let detailFeatureStore = new Map();  // id -> feature (Zoom 19用詳細地物)
-  let tileStatsStore = new Map();      // "x_y" -> { total, tagged, timestamp }
+  let detailFeatureStore = new Map();
+  let tileStatsStore = new Map();
 
   let isFetching = false;
   let abortController = null;
+  let debounceTimer = null; // デバウンス制御
 
   function updateStatus(text, bg = "#e2e8f0", fg = "#475569") {
     const el = document.getElementById('status-badge');
@@ -250,15 +244,13 @@
     el.style.color = fg;
   }
 
-  /* --- LocalStorage キャッシュ操作 --- */
+  /* --- LocalStorage キャッシュ --- */
   function loadTileFromCache(key) {
     try {
       const item = localStorage.getItem(STORAGE_PREFIX_TILE + key);
       if (!item) return null;
       const parsed = JSON.parse(item);
-      const now = Date.now();
-      // 3日以上経過している場合はキャッシュ無効
-      if (now - parsed.timestamp > CACHE_TTL_MS) {
+      if (Date.now() - parsed.timestamp > CACHE_TTL_MS) {
         localStorage.removeItem(STORAGE_PREFIX_TILE + key);
         return null;
       }
@@ -277,9 +269,7 @@
       };
       localStorage.setItem(STORAGE_PREFIX_TILE + key, JSON.stringify(payload));
       tileStatsStore.set(key, payload);
-    } catch (e) {
-      console.warn("LocalStorage save failed (quota exceeded?):", e);
-    }
+    } catch (e) {}
   }
 
   function getSavedState() {
@@ -300,9 +290,7 @@
         lng: center.lng,
         zoom: map.getZoom()
       }));
-    } catch (e) {
-      console.warn("sessionStorage save failed:", e);
-    }
+    } catch (e) {}
   }
 
   function initMap() {
@@ -329,26 +317,30 @@
     gridLayer = L.layerGroup().addTo(map);
     markersLayer = L.layerGroup().addTo(map);
 
-    map.on('zoomend', () => {
+    // 操作完了後 500ms 停止してから通信を開始（連続通信による重延を撲滅）
+    const onMapMove = () => {
       saveCurrentState();
-      handleMapChange();
-    });
-    map.on('moveend', () => {
-      saveCurrentState();
-      handleMapChange();
-    });
+      renderLayers(); // キャッシュ済みのものは即座に描画
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        fetchAppropriateData(false);
+      }, 500);
+    };
+
+    map.on('zoomend', onMapMove);
+    map.on('moveend', onMapMove);
 
     document.getElementById('btn-reload').addEventListener('click', () => fetchAppropriateData(true));
     document.getElementById('btn-locate').addEventListener('click', () => requestGeolocation(true));
     document.getElementById('btn-home').addEventListener('click', () => {
       map.setView(HOME_COORDS, DEFAULT_ZOOM);
       saveCurrentState();
-      fetchAppropriateData();
+      fetchAppropriateData(false);
     });
 
     if (isReload) {
-      updateStatus("復元完了", "#e0e7ff", "#3730a3");
-      fetchAppropriateData();
+      renderLayers();
+      fetchAppropriateData(false);
     } else {
       requestGeolocation(false);
     }
@@ -357,7 +349,7 @@
   function requestGeolocation(moveTo = false) {
     if (!navigator.geolocation) {
       updateStatus("ホーム (標準)", "#e2e8f0", "#475569");
-      fetchAppropriateData();
+      fetchAppropriateData(false);
       return;
     }
 
@@ -371,12 +363,12 @@
         map.setView([lat, lng], DEFAULT_ZOOM);
         saveCurrentState();
         updateStatus("現在地表示中", "#dcfce7", "#15803d");
-        fetchAppropriateData();
+        fetchAppropriateData(false);
       },
       (err) => {
         console.warn(`Geolocation: ${err.message}`);
         updateStatus("ホーム (標準)", "#e2e8f0", "#475569");
-        fetchAppropriateData();
+        fetchAppropriateData(false);
       },
       { enableHighAccuracy: false, timeout: 5000, maximumAge: 60000 }
     );
@@ -417,111 +409,80 @@
     return [[Math.min(lat1, lat2), lon1], [Math.max(lat1, lat2), lon2]];
   }
 
-  function handleMapChange() {
-    renderLayers();
-    fetchAppropriateData(false);
-  }
-
-  /* --- ズームレベルに応じた取得振り分け --- */
   function fetchAppropriateData(force = false) {
     if (!map) return;
     const zoom = map.getZoom();
 
     if (zoom >= MAX_MAP_ZOOM) {
-      // Zoom 19: 個別地物詳細（out body;）を取得
       fetchDetailData();
     } else {
-      // Zoom < 19: タイルごとの件数のみを軽量取得（キャッシュ優先）
-      fetchTileCountsWithCache(force);
+      fetchTileCountsOptimized(force);
     }
   }
 
-  // タイル件数用軽量クエリ
-  function buildLightweightTileQuery(bboxes) {
-    const unionBlocks = bboxes.map(b => `
-      node["barrier"="kerb"](${b.s},${b.w},${b.n},${b.e});
-      node["highway"="crossing"](${b.s},${b.w},${b.n},${b.e});
-      node["highway"="elevator"](${b.s},${b.w},${b.n},${b.e});
-      node["shop"](${b.s},${b.w},${b.n},${b.e});
-      node["amenity"](${b.s},${b.w},${b.n},${b.e});
-      node["wheelchair"](${b.s},${b.w},${b.n},${b.e});
-    `).join('\n');
-
-    return `[out:json][timeout:15];
-(
-  ${unionBlocks}
-);
-out skel qt;
-out tags qt;`;
-  }
-
-  // Zoom 19用 詳細クエリ
-  function buildDetailQuery(bbox) {
-    const s = bbox.getSouth();
-    const w = bbox.getWest();
-    const n = bbox.getNorth();
-    const e = bbox.getEast();
-
-    return `[out:json][timeout:15];
-(
-  node["barrier"="kerb"](${s},${w},${n},${e});
-  node["kerb"](${s},${w},${n},${e});
-  node["highway"="crossing"](${s},${w},${n},${e});
-  node["highway"="elevator"](${s},${w},${n},${e});
-  node["shop"](${s},${w},${n},${e});
-  node["amenity"](${s},${w},${n},${e});
-  node["wheelchair"](${s},${w},${n},${e});
-  node["toilets:wheelchair"](${s},${w},${n},${e});
-);
-out body;`;
-  }
-
-  // タイル件数の取得（3日間キャッシュを照合し、未取得または3日経過タイルのみ通信）
-  async function fetchTileCountsWithCache(force = false) {
+  /* --- 単一BBoxによる超高速件数取得 --- */
+  async function fetchTileCountsOptimized(force = false) {
     if (isFetching) return;
 
     const bounds = map.getBounds();
     const nwTile = latLngToTile(bounds.getNorth(), bounds.getWest(), TILE_BASE_ZOOM);
     const seTile = latLngToTile(bounds.getSouth(), bounds.getEast(), TILE_BASE_ZOOM);
 
-    const missingTiles = [];
-    let hasLoadedFromCache = false;
+    const minX = Math.min(nwTile.x, seTile.x);
+    const maxX = Math.max(nwTile.x, seTile.x);
+    const minY = Math.min(nwTile.y, seTile.y);
+    const maxY = Math.max(nwTile.y, seTile.y);
 
-    for (let x = Math.min(nwTile.x, seTile.x); x <= Math.max(nwTile.x, seTile.x); x++) {
-      for (let y = Math.min(nwTile.y, seTile.y); y <= Math.max(nwTile.y, seTile.y); y++) {
+    let needsFetch = force;
+    let missingTileKeys = new Set();
+
+    for (let x = minX; x <= maxX; x++) {
+      for (let y = minY; y <= maxY; y++) {
         const key = `${x}_${y}`;
         if (!force) {
-          // メモリまたはLocalStorageをチェック
-          let stat = tileStatsStore.get(key) || loadTileFromCache(key);
-          if (stat) {
-            tileStatsStore.set(key, stat);
-            hasLoadedFromCache = true;
+          const cached = tileStatsStore.get(key) || loadTileFromCache(key);
+          if (cached) {
+            tileStatsStore.set(key, cached);
             continue;
           }
         }
-        // キャッシュがないか期限切れ
-        const b = tileToLatLngBounds(x, y, TILE_BASE_ZOOM);
-        missingTiles.push({ x, y, s: b[0][0], w: b[0][1], n: b[1][0], e: b[1][1], key });
+        needsFetch = true;
+        missingTileKeys.add(key);
       }
     }
 
-    if (hasLoadedFromCache) {
-      renderLayers();
-    }
+    renderLayers();
 
-    // すべてのタイルが有効キャッシュ内であればAPIリクエスト不要
-    if (missingTiles.length === 0) {
+    // 画面内がすべてキャッシュ済みなら通信不要
+    if (!needsFetch || missingTileKeys.size === 0) {
       updateStatus("正常 (キャッシュ)", "#dcfce7", "#15803d");
       return;
     }
 
+    // タイル別OR結合ではなく、画面全体（Bounding Box）で1回だけ問い合わせる
+    const s = bounds.getSouth();
+    const w = bounds.getWest();
+    const n = bounds.getNorth();
+    const e = bounds.getEast();
+
+    // 不要なタグを落とし、最低限の判定タグのみ取得して転送量を極小化
+    const query = `[out:json][timeout:10];
+(
+  node["barrier"="kerb"](${s},${w},${n},${e});
+  node["highway"~"^(crossing|elevator)$"](${s},${w},${n},${e});
+  node["shop"](${s},${w},${n},${e});
+  node["amenity"](${s},${w},${n},${e});
+  node["wheelchair"](${s},${w},${n},${e});
+);
+out skel qt;
+out tags qt;`;
+
     isFetching = true;
-    updateStatus(`差分取得中 (${missingTiles.length}区画)...`, "#dbeafe", "#1d4ed8");
+    updateStatus("高速取得中...", "#dbeafe", "#1d4ed8");
 
     if (abortController) abortController.abort();
     abortController = new AbortController();
 
-    const query = buildLightweightTileQuery(missingTiles);
     let success = false;
 
     for (const endpoint of OVERPASS_ENDPOINTS) {
@@ -539,16 +500,16 @@ out body;`;
 
         const data = JSON.parse(text);
         if (data && Array.isArray(data.elements)) {
-          // 取得対象タイルの集計オブジェクトを初期化
-          const tempTileMap = new Map();
-          missingTiles.forEach(t => tempTileMap.set(t.key, { total: 0, tagged: 0 }));
+          // 未取得タイルのカウンターを初期化
+          const tempMap = new Map();
+          missingTileKeys.forEach(k => tempMap.set(k, { total: 0, tagged: 0 }));
 
           data.elements.forEach(item => {
             if (!item.lat || !item.lon) return;
             const t = latLngToTile(item.lat, item.lon, TILE_BASE_ZOOM);
             const key = `${t.x}_${t.y}`;
-            if (tempTileMap.has(key)) {
-              const stat = tempTileMap.get(key);
+            if (tempMap.has(key)) {
+              const stat = tempMap.get(key);
               stat.total += 1;
               if (evaluateAccessibility(item.tags).isRegistered) {
                 stat.tagged += 1;
@@ -556,8 +517,8 @@ out body;`;
             }
           });
 
-          // LocalStorageに3日間TTL付きで保存
-          tempTileMap.forEach((stat, key) => {
+          // キャッシュ保存
+          tempMap.forEach((stat, key) => {
             saveTileToCache(key, stat);
           });
 
@@ -566,16 +527,15 @@ out body;`;
         }
       } catch (err) {
         if (err.name === 'AbortError') return;
-        console.warn(`[Overpass Count] ${endpoint} スキップ: ${err.message}`);
       }
     }
 
     isFetching = false;
-    updateStatus(success ? "正常" : "取得待機中", success ? "#dcfce7" : "#fef3c7", success ? "#15803d" : "#b45309");
+    updateStatus(success ? "正常" : "待機中", success ? "#dcfce7" : "#fef3c7", success ? "#15803d" : "#b45309");
     renderLayers();
   }
 
-  // Zoom 19: 個別地物詳細の取得
+  // Zoom 19用 詳細取得
   async function fetchDetailData() {
     if (isFetching) return;
     isFetching = true;
@@ -585,7 +545,23 @@ out body;`;
     abortController = new AbortController();
 
     const bbox = map.getBounds();
-    const query = buildDetailQuery(bbox);
+    const s = bbox.getSouth();
+    const w = bbox.getWest();
+    const n = bbox.getNorth();
+    const e = bbox.getEast();
+
+    const query = `[out:json][timeout:15];
+(
+  node["barrier"="kerb"](${s},${w},${n},${e});
+  node["kerb"](${s},${w},${n},${e});
+  node["highway"~"^(crossing|elevator)$"](${s},${w},${n},${e});
+  node["shop"](${s},${w},${n},${e});
+  node["amenity"](${s},${w},${n},${e});
+  node["wheelchair"](${s},${w},${n},${e});
+  node["toilets:wheelchair"](${s},${w},${n},${e});
+);
+out body;`;
+
     let success = false;
 
     for (const endpoint of OVERPASS_ENDPOINTS) {
@@ -613,12 +589,11 @@ out body;`;
         }
       } catch (err) {
         if (err.name === 'AbortError') return;
-        console.warn(`[Overpass Detail] ${endpoint} スキップ: ${err.message}`);
       }
     }
 
     isFetching = false;
-    updateStatus(success ? "正常" : "取得失敗(再試行推奨)", success ? "#dcfce7" : "#fee2e2", success ? "#15803d" : "#b91c1c");
+    updateStatus(success ? "正常" : "取得失敗", success ? "#dcfce7" : "#fee2e2", success ? "#15803d" : "#b91c1c");
     renderLayers();
   }
 
@@ -703,7 +678,6 @@ out body;`;
       for (let y = minY; y <= maxY; y++) {
         const cellBounds = tileToLatLngBounds(x, y, TILE_BASE_ZOOM);
         const key = `${x}_${y}`;
-        // メモリまたはLocalStorageから取得
         let stat = tileStatsStore.get(key) || loadTileFromCache(key);
         if (!stat) stat = { total: 0, tagged: 0 };
 
