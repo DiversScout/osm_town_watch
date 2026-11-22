@@ -208,11 +208,11 @@
   const HOME_COORDS = [33.9452, 130.9616];
   const DEFAULT_ZOOM = 18;
   const MAX_MAP_ZOOM = 19;
+  const MIN_HEATMAP_ZOOM = 15; // タイルを表示する最小ズーム（これ未満は広域としてタイル描画を停止）
   const TILE_BASE_ZOOM = 16;
 
   const STORAGE_KEY_MAP_STATE = "osm_barrier_view_state";
 
-  // 安定してJSONを返すエンドポイント順
   const OVERPASS_ENDPOINTS = [
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass-api.de/api/interpreter",
@@ -417,6 +417,14 @@
   function renderFixedGridHeatmap() {
     gridLayer.clearLayers();
 
+    const zoom = map.getZoom();
+
+    // マクロ表示 (Zoom < 15) は描画負荷を完全に排するためタイル非表示
+    if (zoom < MIN_HEATMAP_ZOOM) {
+      document.getElementById('count-info').innerText = "広域表示中 (ズームインで詳細)";
+      return;
+    }
+
     const bounds = map.getBounds();
     const nwTile = latLngToTile(bounds.getNorth(), bounds.getWest(), TILE_BASE_ZOOM);
     const seTile = latLngToTile(bounds.getSouth(), bounds.getEast(), TILE_BASE_ZOOM);
@@ -492,7 +500,6 @@
     }
   }
 
-  /* --- Zoom 19: 個別地物取得 (安全なパースとフォールバック) --- */
   async function fetchDetailData() {
     if (isFetchingDetail) return;
     isFetchingDetail = true;
