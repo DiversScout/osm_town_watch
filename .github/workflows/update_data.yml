@@ -1,23 +1,23 @@
-name: Update Barrier Data
+name: Update Nationwide Barrier Data (PBF)
 
 on:
   schedule:
-    # 毎日日本時間 午前4時 (UTC 19:00) に自動更新
-    - cron: '0 19 * * *'
-  workflow_dispatch: # 手動実行可能
+    # 毎週日曜日の午前3時 (JST) / 土曜日 18:00 (UTC)
+    - cron: '0 18 * * 6'
+  workflow_dispatch: # 手動即時実行
 
-# ワークフロー全体に書き込み権限を付与
 permissions:
   contents: write
 
 jobs:
-  build-and-update:
+  build-nationwide-tiles:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # 最新コミットを取得しトークンを保持
           persist-credentials: true
 
       - name: Set up Python
@@ -25,11 +25,22 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
-        run: pip install requests
+      - name: Install Osmium and Dependencies
+        run: |
+          pip install osmium requests
 
-      - name: Run Aggregator Script
-        run: python scripts/aggregate_barrier.py
+      - name: Download Japan OSM PBF
+        run: |
+          echo "Downloading japan-latest.osm.pbf from Geofabrik..."
+          curl -L -o japan-latest.osm.pbf https://download.geofabrik.de/asia/japan-latest.osm.pbf
+
+      - name: Run PBF Aggregator
+        run: |
+          python scripts/aggregate_pbf.py japan-latest.osm.pbf
+
+      - name: Cleanup PBF File
+        run: |
+          rm -f japan-latest.osm.pbf
 
       - name: Commit and push if changed
         run: |
@@ -39,6 +50,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes in data/tiles.json"
           else
-            git commit -m "Update barrier tile cache [skip ci]"
+            git commit -m "Update nationwide barrier tile data (PBF) [skip ci]"
             git push origin HEAD:${{ github.ref_name }}
           fi
