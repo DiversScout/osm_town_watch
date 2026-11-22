@@ -158,20 +158,20 @@
 
     /* 【形状】登録状況による区分 */
     .shape-registered {
-      border-radius: 50%; /* 丸：登録済み */
+      border-radius: 50%;
       border: 2px solid #ffffff;
     }
     .shape-unregistered {
-      border-radius: 6px; /* 四角：未登録 */
+      border-radius: 6px;
       border: 2px dashed #ffffff;
       opacity: 0.85;
     }
 
     /* 【色】通行可否による区分 */
-    .color-passable { background-color: #16a34a; } /* 緑：通行可・スロープ/段差解消済 */
-    .color-limited  { background-color: #f59e0b; } /* 黄：要介助・条件付き */
-    .color-blocked  { background-color: #dc2626; } /* 赤：通行不可・高い段差あり */
-    .color-unknown  { background-color: #64748b; } /* 灰：未調査・詳細不明 */
+    .color-passable { background-color: #16a34a; }
+    .color-limited  { background-color: #f59e0b; }
+    .color-blocked  { background-color: #dc2626; }
+    .color-unknown  { background-color: #64748b; }
 
     /* 現在地ピン */
     .current-loc-marker {
@@ -219,7 +219,7 @@
   const MOJIKO_COORDS = [33.9452, 130.9616];
   const DEFAULT_ZOOM = 18;
   const MAX_MAP_ZOOM = 19;
-  const TILE_BASE_ZOOM = 16;
+  const TILE_BASE_ZOOM = 16; // 固定グリッド基準ズーム
 
   const STORAGE_KEY_MAP_STATE = "osm_barrier_view_state";
 
@@ -235,7 +235,11 @@
   let gridLayer = null;
   let markersLayer = null;
   let currentLocationMarker = null;
-  let featureStore = new Map();
+
+  // キャッシュストア
+  let featureStore = new Map(); // id -> feature
+  let tileStatsStore = new Map(); // "x_y" -> { total: 0, tagged: 0 } 固定タイルの普遍集計値
+
   let isFetching = false;
   let abortController = null;
 
@@ -360,7 +364,6 @@
     }
   }
 
-  // 縁石(kerb)を含め、バリアフリー関係地物を網羅取得
   function buildQuery(bbox) {
     const s = bbox.getSouth();
     const w = bbox.getWest();
@@ -414,6 +417,7 @@ out body;`;
               featureStore.set(item.id, item);
             }
           });
+          rebuildTileStatistics(); // 全取得データから固定タイルの集計を普遍更新
           success = true;
           break;
         }
@@ -450,9 +454,7 @@ out body;`;
     return [[Math.min(lat1, lat2), lon1], [Math.max(lat1, lat2), lon2]];
   }
 
-  // 地物の「登録状況」と「通行ステータス」を解析
   function evaluateAccessibility(tags = {}) {
-    // 1. 縁石 (Kerb) の判定
     if (tags.barrier === 'kerb' || tags.kerb) {
       const k = tags.kerb || '';
       if (k === 'flush' || k === 'lowered') {
@@ -466,12 +468,10 @@ out body;`;
       }
     }
 
-    // 2. エレベーター
     if (tags.highway === 'elevator') {
       return { isRegistered: true, passStatus: 'passable', type: 'elevator', desc: 'エレベーター' };
     }
 
-    // 3. 車椅子タグ (wheelchair=*)
     if (tags.wheelchair) {
       if (tags.wheelchair === 'yes') {
         return { isRegistered: true, passStatus: 'passable', type: 'poi', desc: '車椅子利用可 (wheelchair=yes)' };
@@ -482,17 +482,33 @@ out body;`;
       }
     }
 
-    // 4. 多機能トイレ
     if (tags['toilets:wheelchair'] === 'yes') {
       return { isRegistered: true, passStatus: 'passable', type: 'toilet', desc: '車椅子対応トイレ' };
     }
 
-    // 5. バリアフリー情報が未登録の施設・交差点
     if (tags.highway === 'crossing') {
       return { isRegistered: false, passStatus: 'unknown', type: 'crossing', desc: '横断歩道 (バリアフリー未登録)' };
     }
 
     return { isRegistered: false, passStatus: 'unknown', type: 'poi', desc: `${tags.name || '施設/店舗'} (バリアフリー未登録)` };
+  }
+
+  // 画面の視界範囲（Viewport）に依存せず、各タイル固有の集計値を固定計算
+  function rebuildTileStatistics() {
+    tileStatsStore.clear();
+
+    featureStore.forEach(el => {
+      const t = latLngToTile(el.lat, el.lon, TILE_BASE_ZOOM);
+      const key = `${t.x}_${t.y}`;
+      if (!tileStatsStore.has(key)) {
+        tileStatsStore.set(key, { total: 0, tagged: 0 });
+      }
+      const stat = tileStatsStore.get(key);
+      stat.total += 1;
+      if (evaluateAccessibility(el.tags).isRegistered) {
+        stat.tagged += 1;
+      }
+    });
   }
 
   function getRatioColor(ratio, totalEligible) {
@@ -502,13 +518,13 @@ out body;`;
 
     let r, g, b;
     if (ratio < 0.25) {
-      r = 239; g = 68; b = 68; // 赤
+      r = 239; g = 68; b = 68;
     } else if (ratio < 0.5) {
-      r = 245; g = 158; b = 11; // 橙黄
+      r = 245; g = 158; b = 11;
     } else if (ratio < 0.75) {
-      r = 132; g = 204; b = 22; // 黄緑
+      r = 132; g = 204; b = 22;
     } else {
-      r = 16; g = 185; b = 129; // 緑
+      r = 16; g = 185; b = 129;
     }
 
     return {
@@ -518,7 +534,7 @@ out body;`;
     };
   }
 
-  function renderFixedGridHeatmap(elements) {
+  function renderFixedGridHeatmap() {
     gridLayer.clearLayers();
 
     const bounds = map.getBounds();
@@ -530,27 +546,12 @@ out body;`;
     const minY = Math.min(nwTile.y, seTile.y);
     const maxY = Math.max(nwTile.y, seTile.y);
 
-    const tileStats = new Map();
-
-    elements.forEach(el => {
-      if (bounds.contains([el.lat, el.lon])) {
-        const t = latLngToTile(el.lat, el.lon, TILE_BASE_ZOOM);
-        const key = `${t.x}_${t.y}`;
-        if (!tileStats.has(key)) tileStats.set(key, { total: 0, tagged: 0 });
-
-        const stat = tileStats.get(key);
-        stat.total += 1;
-        if (evaluateAccessibility(el.tags).isRegistered) {
-          stat.tagged += 1;
-        }
-      }
-    });
-
+    // 画面内と交差している固定タイルのみ描画（数値は事前計算された固定値を使用）
     for (let x = minX; x <= maxX; x++) {
       for (let y = minY; y <= maxY; y++) {
         const cellBounds = tileToLatLngBounds(x, y, TILE_BASE_ZOOM);
         const key = `${x}_${y}`;
-        const stat = tileStats.get(key) || { total: 0, tagged: 0 };
+        const stat = tileStatsStore.get(key) || { total: 0, tagged: 0 };
         const ratio = stat.total > 0 ? (stat.tagged / stat.total) : 0;
         const colorStyle = getRatioColor(ratio, stat.total);
 
@@ -562,6 +563,7 @@ out body;`;
           interactive: false
         }).addTo(gridLayer);
 
+        // タイル内に地物が存在する場合、そのタイル固有の固定カウント・比率を表示
         if (stat.total > 0) {
           const centerLat = (cellBounds[0][0] + cellBounds[1][0]) / 2;
           const centerLng = (cellBounds[0][1] + cellBounds[1][1]) / 2;
@@ -598,10 +600,10 @@ out body;`;
     document.getElementById('zoom-info').innerText = `ズーム: ${zoom}`;
     document.getElementById('count-info').innerText = `付与済: ${registeredCount} / 候補: ${elements.length}`;
 
-    // グリッドヒートマップは常時表示維持
-    renderFixedGridHeatmap(elements);
+    // 地図移動時も不変のタイルヒートマップを描画
+    renderFixedGridHeatmap();
 
-    // Zoom 19 (最大ズーム) で形状と色を分けた個別ピンを表示
+    // Zoom 19 (最大ズーム) の個別ピン
     markersLayer.clearLayers();
     if (zoom >= MAX_MAP_ZOOM) {
       const bounds = map.getBounds();
@@ -613,21 +615,17 @@ out body;`;
     }
   }
 
-  // 登録状況（形状）と通行可否（色）を反映したマーカー生成
   function createStyledMarker(item) {
     const tags = item.tags || {};
     const evalResult = evaluateAccessibility(tags);
 
-    // 1. 形状クラス (丸: 登録済 / 四角: 未登録)
     const shapeClass = evalResult.isRegistered ? 'shape-registered' : 'shape-unregistered';
 
-    // 2. 色クラス (緑: 通行可 / 黄: 要介助 / 赤: 不可 / 灰: 未調査)
     let colorClass = 'color-unknown';
     if (evalResult.passStatus === 'passable') colorClass = 'color-passable';
     else if (evalResult.passStatus === 'limited') colorClass = 'color-limited';
     else if (evalResult.passStatus === 'blocked') colorClass = 'color-blocked';
 
-    // 3. ピクトグラム
     let iconChar = '♿';
     if (evalResult.type === 'kerb') iconChar = '⤓';
     else if (evalResult.type === 'elevator') iconChar = '🛗';
