@@ -205,20 +205,22 @@
   </div>
 
   <div class="btn-group">
-    <button class="btn btn-primary" id="btn-reload">エリア再取得</button>
+    <button class="btn btn-primary" id="btn-reload">強制再取得</button>
     <button class="btn" id="btn-locate">現在地へ移動</button>
     <button class="btn" id="btn-home">ホームへ</button>
   </div>
 </div>
 
 <script>
-  // ホーム座標（門司港駅）
   const HOME_COORDS = [33.9452, 130.9616];
   const DEFAULT_ZOOM = 18;
   const MAX_MAP_ZOOM = 19;
   const TILE_BASE_ZOOM = 16; // 固定グリッド基準ズーム
 
+  // キャッシュ有効期限: 3日間 (ミリ秒)
+  const CACHE_TTL_MS = 3 * 24 * 60 * 60 * 1000;
   const STORAGE_KEY_MAP_STATE = "osm_barrier_view_state";
+  const STORAGE_PREFIX_TILE = "osm_tile_z16_";
 
   const OVERPASS_ENDPOINTS = [
     "https://overpass.kumi.systems/api/interpreter",
@@ -233,10 +235,9 @@
   let markersLayer = null;
   let currentLocationMarker = null;
 
-  // キャッシュ
-  let detailFeatureStore = new Map();  // id -> feature (Zoom 19用)
-  let tileStatsStore = new Map();      // "x_y" -> { total: 0, tagged: 0 } (Zoom 16固定タイル集計値)
-  let fetchedTilesSet = new Set();     // 取得済みタイルキーの記録
+  // メモリストア
+  let detailFeatureStore = new Map();  // id -> feature (Zoom 19用詳細地物)
+  let tileStatsStore = new Map();      // "x_y" -> { total, tagged, timestamp }
 
   let isFetching = false;
   let abortController = null;
@@ -247,6 +248,38 @@
     el.innerText = text;
     el.style.backgroundColor = bg;
     el.style.color = fg;
+  }
+
+  /* --- LocalStorage キャッシュ操作 --- */
+  function loadTileFromCache(key) {
+    try {
+      const item = localStorage.getItem(STORAGE_PREFIX_TILE + key);
+      if (!item) return null;
+      const parsed = JSON.parse(item);
+      const now = Date.now();
+      // 3日以上経過している場合はキャッシュ無効
+      if (now - parsed.timestamp > CACHE_TTL_MS) {
+        localStorage.removeItem(STORAGE_PREFIX_TILE + key);
+        return null;
+      }
+      return parsed;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function saveTileToCache(key, stat) {
+    try {
+      const payload = {
+        total: stat.total,
+        tagged: stat.tagged,
+        timestamp: Date.now()
+      };
+      localStorage.setItem(STORAGE_PREFIX_TILE + key, JSON.stringify(payload));
+      tileStatsStore.set(key, payload);
+    } catch (e) {
+      console.warn("LocalStorage save failed (quota exceeded?):", e);
+    }
   }
 
   function getSavedState() {
@@ -296,7 +329,6 @@
     gridLayer = L.layerGroup().addTo(map);
     markersLayer = L.layerGroup().addTo(map);
 
-    // 画面操作時に更新
     map.on('zoomend', () => {
       saveCurrentState();
       handleMapChange();
@@ -315,7 +347,7 @@
     });
 
     if (isReload) {
-      updateStatus("リロード復元", "#e0e7ff", "#3730a3");
+      updateStatus("復元完了", "#e0e7ff", "#3730a3");
       fetchAppropriateData();
     } else {
       requestGeolocation(false);
@@ -387,39 +419,37 @@
 
   function handleMapChange() {
     renderLayers();
-    // 画面内に未取得のタイルがあれば自動で取得
     fetchAppropriateData(false);
   }
 
-  /* --- ズームに応じた高速リクエスト切り替え --- */
+  /* --- ズームレベルに応じた取得振り分け --- */
   function fetchAppropriateData(force = false) {
     if (!map) return;
     const zoom = map.getZoom();
 
     if (zoom >= MAX_MAP_ZOOM) {
-      // Zoom 19: 個別アイコン用（詳細タグを取得）
+      // Zoom 19: 個別地物詳細（out body;）を取得
       fetchDetailData();
     } else {
-      // Zoom < 19: タイル件数用（軽量クエリで件数のみ取得）
-      fetchLightweightTileCounts(force);
+      // Zoom < 19: タイルごとの件数のみを軽量取得（キャッシュ優先）
+      fetchTileCountsWithCache(force);
     }
   }
 
-  // タイル用軽量クエリ（座標と基本タグのみで転送量を激減）
-  function buildLightweightQuery(bbox) {
-    const s = bbox.getSouth();
-    const w = bbox.getWest();
-    const n = bbox.getNorth();
-    const e = bbox.getEast();
+  // タイル件数用軽量クエリ
+  function buildLightweightTileQuery(bboxes) {
+    const unionBlocks = bboxes.map(b => `
+      node["barrier"="kerb"](${b.s},${b.w},${b.n},${b.e});
+      node["highway"="crossing"](${b.s},${b.w},${b.n},${b.e});
+      node["highway"="elevator"](${b.s},${b.w},${b.n},${b.e});
+      node["shop"](${b.s},${b.w},${b.n},${b.e});
+      node["amenity"](${b.s},${b.w},${b.n},${b.e});
+      node["wheelchair"](${b.s},${b.w},${b.n},${b.e});
+    `).join('\n');
 
     return `[out:json][timeout:15];
 (
-  node["barrier"="kerb"](${s},${w},${n},${e});
-  node["highway"="crossing"](${s},${w},${n},${e});
-  node["highway"="elevator"](${s},${w},${n},${e});
-  node["shop"](${s},${w},${n},${e});
-  node["amenity"](${s},${w},${n},${e});
-  node["wheelchair"](${s},${w},${n},${e});
+  ${unionBlocks}
 );
 out skel qt;
 out tags qt;`;
@@ -446,34 +476,52 @@ out tags qt;`;
 out body;`;
   }
 
-  async function fetchLightweightTileCounts(force = false) {
+  // タイル件数の取得（3日間キャッシュを照合し、未取得または3日経過タイルのみ通信）
+  async function fetchTileCountsWithCache(force = false) {
     if (isFetching) return;
 
-    // 現在画面内のタイルキーを特定
     const bounds = map.getBounds();
     const nwTile = latLngToTile(bounds.getNorth(), bounds.getWest(), TILE_BASE_ZOOM);
     const seTile = latLngToTile(bounds.getSouth(), bounds.getEast(), TILE_BASE_ZOOM);
 
-    let needsFetch = force;
-    if (!needsFetch) {
-      for (let x = Math.min(nwTile.x, seTile.x); x <= Math.max(nwTile.x, seTile.x); x++) {
-        for (let y = Math.min(nwTile.y, seTile.y); y <= Math.max(nwTile.y, seTile.y); y++) {
-          if (!fetchedTilesSet.has(`${x}_${y}`)) {
-            needsFetch = true;
-            break;
+    const missingTiles = [];
+    let hasLoadedFromCache = false;
+
+    for (let x = Math.min(nwTile.x, seTile.x); x <= Math.max(nwTile.x, seTile.x); x++) {
+      for (let y = Math.min(nwTile.y, seTile.y); y <= Math.max(nwTile.y, seTile.y); y++) {
+        const key = `${x}_${y}`;
+        if (!force) {
+          // メモリまたはLocalStorageをチェック
+          let stat = tileStatsStore.get(key) || loadTileFromCache(key);
+          if (stat) {
+            tileStatsStore.set(key, stat);
+            hasLoadedFromCache = true;
+            continue;
           }
         }
+        // キャッシュがないか期限切れ
+        const b = tileToLatLngBounds(x, y, TILE_BASE_ZOOM);
+        missingTiles.push({ x, y, s: b[0][0], w: b[0][1], n: b[1][0], e: b[1][1], key });
       }
     }
-    if (!needsFetch) return; // 全タイル取得済みなら即終了
+
+    if (hasLoadedFromCache) {
+      renderLayers();
+    }
+
+    // すべてのタイルが有効キャッシュ内であればAPIリクエスト不要
+    if (missingTiles.length === 0) {
+      updateStatus("正常 (キャッシュ)", "#dcfce7", "#15803d");
+      return;
+    }
 
     isFetching = true;
-    updateStatus("件数取得中...", "#dbeafe", "#1d4ed8");
+    updateStatus(`差分取得中 (${missingTiles.length}区画)...`, "#dbeafe", "#1d4ed8");
 
     if (abortController) abortController.abort();
     abortController = new AbortController();
 
-    const query = buildLightweightQuery(bounds);
+    const query = buildLightweightTileQuery(missingTiles);
     let success = false;
 
     for (const endpoint of OVERPASS_ENDPOINTS) {
@@ -491,26 +539,28 @@ out body;`;
 
         const data = JSON.parse(text);
         if (data && Array.isArray(data.elements)) {
-          // タイル別集計を更新
+          // 取得対象タイルの集計オブジェクトを初期化
+          const tempTileMap = new Map();
+          missingTiles.forEach(t => tempTileMap.set(t.key, { total: 0, tagged: 0 }));
+
           data.elements.forEach(item => {
             if (!item.lat || !item.lon) return;
             const t = latLngToTile(item.lat, item.lon, TILE_BASE_ZOOM);
             const key = `${t.x}_${t.y}`;
-            if (!tileStatsStore.has(key)) tileStatsStore.set(key, { total: 0, tagged: 0 });
-
-            const stat = tileStatsStore.get(key);
-            stat.total += 1;
-            if (evaluateAccessibility(item.tags).isRegistered) {
-              stat.tagged += 1;
+            if (tempTileMap.has(key)) {
+              const stat = tempTileMap.get(key);
+              stat.total += 1;
+              if (evaluateAccessibility(item.tags).isRegistered) {
+                stat.tagged += 1;
+              }
             }
           });
 
-          // 画面内のタイルを取得済みとしてマーク
-          for (let x = Math.min(nwTile.x, seTile.x); x <= Math.max(nwTile.x, seTile.x); x++) {
-            for (let y = Math.min(nwTile.y, seTile.y); y <= Math.max(nwTile.y, seTile.y); y++) {
-              fetchedTilesSet.add(`${x}_${y}`);
-            }
-          }
+          // LocalStorageに3日間TTL付きで保存
+          tempTileMap.forEach((stat, key) => {
+            saveTileToCache(key, stat);
+          });
+
           success = true;
           break;
         }
@@ -525,6 +575,7 @@ out body;`;
     renderLayers();
   }
 
+  // Zoom 19: 個別地物詳細の取得
   async function fetchDetailData() {
     if (isFetching) return;
     isFetching = true;
@@ -652,7 +703,9 @@ out body;`;
       for (let y = minY; y <= maxY; y++) {
         const cellBounds = tileToLatLngBounds(x, y, TILE_BASE_ZOOM);
         const key = `${x}_${y}`;
-        const stat = tileStatsStore.get(key) || { total: 0, tagged: 0 };
+        // メモリまたはLocalStorageから取得
+        let stat = tileStatsStore.get(key) || loadTileFromCache(key);
+        if (!stat) stat = { total: 0, tagged: 0 };
 
         screenTotal += stat.total;
         screenTagged += stat.tagged;
@@ -698,10 +751,8 @@ out body;`;
     const zoom = map.getZoom();
     document.getElementById('zoom-info').innerText = `ズーム: ${zoom}`;
 
-    // タイルヒートマップを描画
     renderFixedGridHeatmap();
 
-    // Zoom 19 (最大ズーム) のみ個別ピンを描画
     markersLayer.clearLayers();
     if (zoom >= MAX_MAP_ZOOM) {
       const bounds = map.getBounds();
