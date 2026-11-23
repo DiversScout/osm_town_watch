@@ -82,14 +82,15 @@ class RegionalTileHandler(osmium.SimpleHandler):
         if not is_target:
             return
 
-        # ノード自身の座標を取得（Nodeレコード自身に含まれるためキャッシュ不要）
+        # 座標の安全な取得
         try:
             loc = n.location
             if not loc.valid():
                 return
             lat = round(loc.lat, 6)
             lon = round(loc.lon, 6)
-        except Exception:
+        except BaseException:
+            # osmium.InvalidLocationError など C++ 例外を含むすべての基底例外を捕捉
             return
 
         self.matched += 1
@@ -140,8 +141,8 @@ def main():
         print(f"Reading: {pbf} ({size_mb:.1f} MB) ...")
         t0 = time.time()
 
-        # 標準呼び出し（Node単体処理のため locations キャッシュは一切不要）
-        handler.apply_file(pbf)
+        # locations=True でノード座標を有効化
+        handler.apply_file(pbf, locations=True)
         print(f"Finished {pbf} in {time.time() - t0:.1f}s")
 
     print(f"All files processed in {time.time() - total_start:.1f}s.")
