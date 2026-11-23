@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>バリアフリー情報可視化マップ (OSM)</title>
 
-  <!-- Leaflet CSS -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
 
   <style>
@@ -54,7 +53,7 @@
 
     .legend-row {
       display: flex;
-      gap: 10px;
+      gap: 8px;
       font-size: 11px;
       color: #475569;
       margin-bottom: 10px;
@@ -72,6 +71,13 @@
       width: 10px;
       height: 10px;
       border-radius: 50%;
+    }
+    .legend-rect {
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+      border: 1px dashed #64748b;
+      background: #cbd5e1;
     }
 
     .btn-group {
@@ -133,6 +139,30 @@
       line-height: 1.1;
     }
 
+    .poi-icon {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 26px !important;
+      height: 26px !important;
+      font-size: 13px;
+      color: #ffffff;
+      box-shadow: 0 2px 5px rgba(0, 0, 0, 0.35);
+    }
+    .shape-registered {
+      border-radius: 50%;
+      border: 2px solid #ffffff;
+    }
+    .shape-unregistered {
+      border-radius: 6px;
+      border: 2px dashed #ffffff;
+      opacity: 0.85;
+    }
+    .color-passable { background-color: #16a34a; }
+    .color-limited  { background-color: #f59e0b; }
+    .color-blocked  { background-color: #dc2626; }
+    .color-unknown  { background-color: #64748b; }
+
     .current-loc-marker {
       width: 14px;
       height: 14px;
@@ -143,7 +173,7 @@
     }
   </style>
 
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""></script>
 </head>
 <body>
 
@@ -160,10 +190,10 @@
   </div>
 
   <div class="legend-row">
-    <div class="legend-item"><span class="legend-dot" style="background:#10b981;"></span><span>75%以上</span></div>
-    <div class="legend-item"><span class="legend-dot" style="background:#84cc16;"></span><span>50%〜</span></div>
-    <div class="legend-item"><span class="legend-dot" style="background:#f59e0b;"></span><span>25%〜</span></div>
-    <div class="legend-item"><span class="legend-dot" style="background:#ef4444;"></span><span>25%未満</span></div>
+    <div class="legend-item"><span class="legend-dot" style="background:#16a34a;"></span><span>可(丸)</span></div>
+    <div class="legend-item"><span class="legend-dot" style="background:#f59e0b;"></span><span>要介助</span></div>
+    <div class="legend-item"><span class="legend-dot" style="background:#dc2626;"></span><span>不可(段差)</span></div>
+    <div class="legend-item"><span class="legend-rect"></span><span>未調査(四角)</span></div>
   </div>
 
   <div class="btn-group">
@@ -179,14 +209,18 @@
   const MAX_MAP_ZOOM = 19;
   const MIN_HEATMAP_ZOOM = 15;
   const TILE_BASE_ZOOM = 16;
+  const BLOCK_ZOOM = 10;
 
   const STORAGE_KEY_MAP_STATE = "osm_barrier_view_state";
 
   let map = null;
   let gridLayer = null;
+  let markersLayer = null;
   let currentLocationMarker = null;
 
   let tileStatsStore = new Map();
+  let blockCache = new Map();       // "bx_by" => features
+  let loadedBlockKeys = new Set();  // 読込済みブロックキー
 
   function updateStatus(text, bg = "#e2e8f0", fg = "#475569") {
     const el = document.getElementById('status-badge');
@@ -239,31 +273,32 @@
     }).addTo(map);
 
     gridLayer = L.layerGroup().addTo(map);
+    markersLayer = L.layerGroup().addTo(map);
 
     const onMapChange = () => {
       saveCurrentState();
-      renderFixedGridHeatmap();
+      renderLayers();
     };
 
     map.on('zoomend', onMapChange);
     map.on('moveend', onMapChange);
 
-    document.getElementById('btn-reload').addEventListener('click', () => loadStaticTileData());
+    document.getElementById('btn-reload').addEventListener('click', () => loadStaticData());
     document.getElementById('btn-locate').addEventListener('click', () => requestGeolocation(true));
     document.getElementById('btn-home').addEventListener('click', () => {
       map.setView(HOME_COORDS, DEFAULT_ZOOM);
       saveCurrentState();
-      renderFixedGridHeatmap();
+      renderLayers();
     });
 
-    await loadStaticTileData();
+    await loadStaticData();
 
     if (!isReload) {
       requestGeolocation(false);
     }
   }
 
-  async function loadStaticTileData() {
+  async function loadStaticData() {
     updateStatus("静的データ読込中...", "#dbeafe", "#1d4ed8");
     try {
       const res = await fetch(`./data/tiles.json?t=${Date.now()}`);
@@ -271,14 +306,14 @@
       const data = await res.json();
 
       tileStatsStore.clear();
-      for (const [key, stat] of Object.entries(data.tiles)) {
+      for (const [key, stat] of Object.entries(data.tiles || {})) {
         tileStatsStore.set(key, stat);
       }
 
       updateStatus(`正常 (${tileStatsStore.size.toLocaleString()}区画)`, "#dcfce7", "#15803d");
-      renderFixedGridHeatmap();
+      renderLayers();
     } catch (e) {
-      console.warn("Static tiles fetch failed:", e);
+      console.warn("Static data fetch failed:", e);
       updateStatus("データ未生成/読込待機", "#fef3c7", "#b45309");
     }
   }
@@ -293,7 +328,7 @@
         setCurMarker(lat, lng);
         map.setView([lat, lng], DEFAULT_ZOOM);
         saveCurrentState();
-        renderFixedGridHeatmap();
+        renderLayers();
       },
       (err) => console.warn(err),
       { enableHighAccuracy: false, timeout: 5000, maximumAge: 60000 }
@@ -362,7 +397,6 @@
     gridLayer.clearLayers();
 
     const zoom = map.getZoom();
-    document.getElementById('zoom-info').innerText = `ズーム: ${zoom}`;
 
     if (zoom < MIN_HEATMAP_ZOOM) {
       document.getElementById('count-info').innerText = "広域表示中 (ズームインで詳細)";
@@ -424,6 +458,100 @@
     }
 
     document.getElementById('count-info').innerText = `付与済: ${screenTagged} / 候補: ${screenTotal}`;
+  }
+
+  function renderLayers() {
+    if (!map) return;
+    const zoom = map.getZoom();
+    document.getElementById('zoom-info').innerText = `ズーム: ${zoom}`;
+
+    renderFixedGridHeatmap();
+
+    markersLayer.clearLayers();
+    if (zoom >= MAX_MAP_ZOOM) {
+      renderBlockMarkers();
+    }
+  }
+
+  // Zoom 19 到達時: 該当する Zoom 10 ブロック JSON を非同期取得してピン描画
+  async function renderBlockMarkers() {
+    const bounds = map.getBounds();
+    const nw = latLngToTile(bounds.getNorth(), bounds.getWest(), BLOCK_ZOOM);
+    const se = latLngToTile(bounds.getSouth(), bounds.getEast(), BLOCK_ZOOM);
+
+    const minBX = Math.min(nw.x, se.x);
+    const maxBX = Math.max(nw.x, se.x);
+    const minBY = Math.min(nw.y, se.y);
+    const maxBY = Math.max(nw.y, se.y);
+
+    for (let bx = minBX; bx <= maxBX; bx++) {
+      for (let by = minBY; by <= maxBY; by++) {
+        const bkey = `${bx}_${by}`;
+
+        if (!blockCache.has(bkey) && !loadedBlockKeys.has(bkey)) {
+          loadedBlockKeys.add(bkey);
+          try {
+            const res = await fetch(`./data/blocks/${bkey}.json`);
+            if (res.ok) {
+              const feats = await res.json();
+              blockCache.set(bkey, feats);
+            }
+          } catch (e) {
+            console.warn(`Block ${bkey} fetch failed:`, e);
+          }
+        }
+
+        const features = blockCache.get(bkey) || [];
+        for (let i = 0; i < features.length; i++) {
+          const feat = features[i];
+          const lat = feat[1];
+          const lon = feat[2];
+          if (bounds.contains([lat, lon])) {
+            createStyledMarker(feat).addTo(markersLayer);
+          }
+        }
+      }
+    }
+  }
+
+  function createStyledMarker(feat) {
+    const [id, lat, lon, type, reg, passStatus, desc] = feat;
+
+    const shapeClass = (reg === 1) ? 'shape-registered' : 'shape-unregistered';
+    let colorClass = 'color-unknown';
+    if (passStatus === 'passable') colorClass = 'color-passable';
+    else if (passStatus === 'limited') colorClass = 'color-limited';
+    else if (passStatus === 'blocked') colorClass = 'color-blocked';
+
+    let iconChar = '♿';
+    if (type === 'kerb') iconChar = '⤓';
+    else if (type === 'elevator') iconChar = '🛗';
+    else if (type === 'toilet') iconChar = '🚻';
+    else if (type === 'crossing') iconChar = '🚶';
+    else if (reg === 0) iconChar = '❓';
+
+    const icon = L.divIcon({
+      className: `poi-icon ${shapeClass} ${colorClass}`,
+      html: iconChar,
+      iconSize: [26, 26],
+      iconAnchor: [13, 13],
+      popupAnchor: [0, -13]
+    });
+
+    const marker = L.marker([lat, lon], { icon });
+    const statusText = (reg === 1) ? '【登録済み】' : '【未登録・要調査】';
+    const statusColor = (passStatus === 'passable') ? '#16a34a' : ((passStatus === 'blocked') ? '#dc2626' : '#b45309');
+
+    const popup = `
+      <strong>${desc}</strong><br>
+      <div style="font-size:11px; margin-top:3px; font-weight:700; color:${statusColor};">${statusText}</div>
+      <div style="font-size:11px; margin-top:4px; color:#64748b;">
+        OSM Node ID: <a href="https://www.openstreetmap.org/node/${id}" target="_blank" rel="noopener">${id}</a>
+      </div>
+    `;
+    marker.bindPopup(popup);
+
+    return marker;
   }
 
   if (document.readyState === 'loading') {
