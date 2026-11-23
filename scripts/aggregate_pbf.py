@@ -3,11 +3,10 @@ import math
 import os
 import sys
 import time
-import glob
 import osmium
 
 TILE_BASE_ZOOM = 16
-BLOCK_ZOOM = 10  # 地物を束ねる上位区画ズーム (約40km四方)
+BLOCK_ZOOM = 10  # 約40km四方で地物を集約（全国で300〜400ファイル程度）
 
 def lat_lng_to_tile(lat, lng, zoom):
     lat_rad = math.radians(lat)
@@ -53,7 +52,7 @@ def evaluate_feature(tags):
     name = tags.get("name", "施設/店舗")
     return "poi", 0, "unknown", f"{name} (未登録)"
 
-class RegionalTileHandler(osmium.SimpleHandler):
+class NationwideTileHandler(osmium.SimpleHandler):
     def __init__(self):
         super().__init__()
         self.tile_stats = {}      # { "x_y": [total, tagged] }
@@ -82,7 +81,6 @@ class RegionalTileHandler(osmium.SimpleHandler):
         if not is_target:
             return
 
-        # 座標の安全な取得
         try:
             loc = n.location
             if not loc.valid():
@@ -90,7 +88,6 @@ class RegionalTileHandler(osmium.SimpleHandler):
             lat = round(loc.lat, 6)
             lon = round(loc.lon, 6)
         except BaseException:
-            # osmium.InvalidLocationError など C++ 例外を含むすべての基底例外を捕捉
             return
 
         self.matched += 1
@@ -116,79 +113,57 @@ class RegionalTileHandler(osmium.SimpleHandler):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python aggregate_pbf.py <pbf_dir_or_file>")
+        print("Usage: python aggregate_pbf.py <pbf_file>")
         sys.exit(1)
 
-    target_path = sys.argv[1]
-    if os.path.isdir(target_path):
-        pbf_files = sorted(glob.glob(os.path.join(target_path, "*.osm.pbf")))
-    else:
-        pbf_files = [target_path]
-
-    if not pbf_files:
-        print(f"Error: No PBF files found in {target_path}")
+    pbf_file = sys.argv[1]
+    if not os.path.exists(pbf_file):
+        print(f"Error: File not found: {pbf_file}")
         sys.exit(1)
 
-    handler = RegionalTileHandler()
-    total_start = time.time()
+    size_mb = os.path.getsize(pbf_file) / (1024 * 1024)
+    print(f"Start processing nationwide file: {pbf_file} ({size_mb:.1f} MB)...")
+    start_time = time.time()
 
-    for pbf in pbf_files:
-        if not os.path.exists(pbf):
-            print(f"Warning: File not found: {pbf}")
-            continue
+    handler = NationwideTileHandler()
+    handler.apply_file(pbf_file, locations=True)
 
-        size_mb = os.path.getsize(pbf) / (1024 * 1024)
-        print(f"Reading: {pbf} ({size_mb:.1f} MB) ...")
-        t0 = time.time()
-
-        # locations=True でノード座標を有効化
-        handler.apply_file(pbf, locations=True)
-        print(f"Finished {pbf} in {time.time() - t0:.1f}s")
-
-    print(f"All files processed in {time.time() - total_start:.1f}s.")
-    print(f"Total processed nodes: {handler.processed:,}")
-    print(f"Matched barrier features: {handler.matched:,} across {len(handler.tile_stats):,} Zoom 16 tiles.")
+    elapsed = time.time() - start_time
+    print(f"Processed {handler.processed:,} nodes in {elapsed:.1f}s.")
+    print(f"Matched {handler.matched:,} barrier features across {len(handler.tile_stats):,} Zoom 16 tiles.")
+    print(f"Distributed across {len(handler.block_features):,} Zoom 10 blocks.")
 
     # 出力先ディレクトリの準備
     os.makedirs("data", exist_ok=True)
     blocks_dir = os.path.join("data", "blocks")
     os.makedirs(blocks_dir, exist_ok=True)
 
-    # 1. Zoom 10 ブロック別地物の書き出し（ブロック単位で更新）
-    print("Writing Zoom 10 block feature files...")
+    # 1. Zoom 10 ブロック別地物の書き出し
+    print("Writing Zoom 10 block files...")
     for bkey, feats in handler.block_features.items():
         block_file = os.path.join(blocks_dir, f"{bkey}.json")
         with open(block_file, "w", encoding="utf-8") as f:
             json.dump(feats, f, separators=(',', ':'))
 
-    # 2. 全国サマリー (data/tiles.json) の読み込み＆差分マージ
-    summary_path = os.path.join("data", "tiles.json")
-    existing_tiles = {}
-
-    if os.path.exists(summary_path):
-        try:
-            with open(summary_path, "r", encoding="utf-8") as f:
-                old_data = json.load(f)
-                existing_tiles = old_data.get("tiles", {})
-                print(f"Loaded existing summary: {len(existing_tiles):,} tiles.")
-        except Exception as e:
-            print(f"Warning: Failed to load existing summary ({e}), creating new.")
-
-    # 今回走査した地方のタイルデータで上書きマージ
-    for k, v in handler.tile_stats.items():
-        existing_tiles[k] = {"total": v[0], "tagged": v[1]}
+    # 2. 全国サマリー (data/tiles.json) の書き出し
+    summary_tiles = {
+        k: {"total": v[0], "tagged": v[1]}
+        for k, v in handler.tile_stats.items()
+    }
 
     summary_payload = {
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "base_zoom": TILE_BASE_ZOOM,
         "block_zoom": BLOCK_ZOOM,
-        "tiles": existing_tiles
+        "tiles": summary_tiles
     }
 
+    summary_path = os.path.join("data", "tiles.json")
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary_payload, f, separators=(',', ':'))
 
-    print(f"Saved merged nationwide summary: {summary_path} ({len(existing_tiles):,} tiles total, {os.path.getsize(summary_path)/(1024*1024):.2f} MB)")
+    print(f"Saved nationwide summary: {summary_path} ({len(summary_tiles):,} tiles, {os.path.getsize(summary_path)/(1024*1024):.2f} MB)")
+    print("Nationwide build completed successfully.")
 
 if __name__ == "__main__":
     main()
