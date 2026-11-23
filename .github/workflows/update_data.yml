@@ -25,6 +25,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: true
 
       - name: Set up Python
@@ -50,13 +51,19 @@ jobs:
         run: |
           rm -f japan-latest.osm.pbf
 
+      - name: Verify generated data
+        run: |
+          ls -lh data/
+          ls -lh data/blocks/ | head -n 20
+          echo "Total block files: $(ls -1 data/blocks/*.json 2>/dev/null | wc -l)"
+
       - name: Commit and push changes
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/
+          git add -A data/
           if git diff --staged --quiet; then
-            echo "No changes to commit."
+            echo "No data changes detected."
           else
             git commit -m "Update nationwide barrier data [skip ci]"
             git push origin HEAD:${{ github.ref_name }}
