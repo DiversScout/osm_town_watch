@@ -82,14 +82,16 @@ class RegionalTileHandler(osmium.SimpleHandler):
         if not is_target:
             return
 
-        loc = n.location
-        if not loc.valid():
+        try:
+            loc = n.location
+            if not loc.valid():
+                return
+            lat = round(loc.lat, 6)
+            lon = round(loc.lon, 6)
+        except Exception:
             return
 
         self.matched += 1
-        lat = round(loc.lat, 6)
-        lon = round(loc.lon, 6)
-
         feat_type, reg, pass_status, desc = evaluate_feature(tags)
 
         # 1. Zoom 16 タイル統計
@@ -117,33 +119,40 @@ def main():
 
     target_path = sys.argv[1]
     if os.path.isdir(target_path):
-        pbf_files = glob.glob(os.path.join(target_path, "*.osm.pbf"))
+        pbf_files = sorted(glob.glob(os.path.join(target_path, "*.osm.pbf")))
     else:
         pbf_files = [target_path]
 
     if not pbf_files:
-        print("Error: No PBF files found to process.")
+        print(f"Error: No PBF files found in {target_path}")
         sys.exit(1)
 
     handler = RegionalTileHandler()
     total_start = time.time()
 
     for pbf in pbf_files:
-        print(f"Reading: {pbf} ...")
+        if not os.path.exists(pbf):
+            print(f"Warning: File not found: {pbf}")
+            continue
+
+        size_mb = os.path.getsize(pbf) / (1024 * 1024)
+        print(f"Reading: {pbf} ({size_mb:.1f} MB) ...")
         t0 = time.time()
-        # locations=False でメモリ爆発を防ぐ (Node 単体座標は直接参照可能)
-        handler.apply_file(pbf, locations=False)
+        
+        # locations=True, idx="flex_mem" でメモリを節約しつつ単体ノードの座標を確実に解決
+        handler.apply_file(pbf, locations=True, idx="flex_mem")
         print(f"Finished {pbf} in {time.time() - t0:.1f}s")
 
-    print(f"All PBFs processed in {time.time() - total_start:.1f}s.")
-    print(f"Matched {handler.matched:,} features across {len(handler.tile_stats):,} Zoom 16 tiles.")
+    print(f"All files processed in {time.time() - total_start:.1f}s.")
+    print(f"Total processed nodes: {handler.processed:,}")
+    print(f"Matched barrier features: {handler.matched:,} across {len(handler.tile_stats):,} Zoom 16 tiles.")
 
     # 出力先ディレクトリの準備
     os.makedirs("data", exist_ok=True)
     blocks_dir = os.path.join("data", "blocks")
     os.makedirs(blocks_dir, exist_ok=True)
 
-    # 1. Zoom 10 ブロック別地物の書き出し（上書き/マージ）
+    # 1. Zoom 10 ブロック別地物の書き出し（ブロック単位で更新）
     print("Writing Zoom 10 block feature files...")
     for bkey, feats in handler.block_features.items():
         block_file = os.path.join(blocks_dir, f"{bkey}.json")
@@ -163,7 +172,7 @@ def main():
         except Exception as e:
             print(f"Warning: Failed to load existing summary ({e}), creating new.")
 
-    # 今回走査したタイルデータで上書き更新
+    # 今回走査した地方のタイルデータで上書きマージ
     for k, v in handler.tile_stats.items():
         existing_tiles[k] = {"total": v[0], "tagged": v[1]}
 
