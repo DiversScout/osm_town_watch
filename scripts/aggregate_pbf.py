@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import shutil
 import sys
 import time
 import osmium
@@ -121,6 +122,12 @@ def main():
         print(f"Error: File not found: {pbf_file}")
         sys.exit(1)
 
+    # リポジトリルート基準の絶対パス取得
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    data_dir = os.path.join(repo_root, "data")
+    blocks_dir = os.path.join(data_dir, "blocks")
+
     size_mb = os.path.getsize(pbf_file) / (1024 * 1024)
     print(f"Start processing nationwide file: {pbf_file} ({size_mb:.1f} MB)...")
     start_time = time.time()
@@ -134,8 +141,7 @@ def main():
     print(f"Distributed across {len(handler.block_features):,} Zoom 10 blocks.")
 
     # 出力先ディレクトリの準備
-    os.makedirs("data", exist_ok=True)
-    blocks_dir = os.path.join("data", "blocks")
+    os.makedirs(data_dir, exist_ok=True)
     os.makedirs(blocks_dir, exist_ok=True)
 
     # 1. Zoom 10 ブロック別地物の書き出し
@@ -158,7 +164,7 @@ def main():
         "tiles": summary_tiles
     }
 
-    summary_path = os.path.join("data", "tiles.json")
+    summary_path = os.path.join(data_dir, "tiles.json")
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary_payload, f, separators=(',', ':'))
 
