@@ -5,7 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>バリアフリー情報可視化マップ (OSM)</title>
 
+  <!-- Leaflet CSS (必ず link タグで読み込む) -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+
+  <!-- Leaflet JS (必ず script タグで先に読み込む) -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -172,8 +176,6 @@
       box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.35);
     }
   </style>
-
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""></script>
 </head>
 <body>
 
@@ -219,8 +221,8 @@
   let currentLocationMarker = null;
 
   let tileStatsStore = new Map();
-  let blockCache = new Map();       // "bx_by" => features
-  let loadedBlockKeys = new Set();  // 読込済みブロックキー
+  let blockCache = new Map();
+  let loadedBlockKeys = new Set();
 
   function updateStatus(text, bg = "#e2e8f0", fg = "#475569") {
     const el = document.getElementById('status-badge');
@@ -249,6 +251,51 @@
         zoom: map.getZoom()
       }));
     } catch (e) {}
+  }
+
+  function latLngToTile(lat, lng, zoom) {
+    const latRad = (lat * Math.PI) / 180;
+    const n = Math.pow(2, zoom);
+    const x = Math.floor(((lng + 180) / 360) * n);
+    const y = Math.floor((1 - Math.asinh(Math.tan(latRad)) / Math.PI) / 2 * n);
+    return { x, y };
+  }
+
+  function tileToLatLngBounds(x, y, zoom) {
+    const n = Math.pow(2, zoom);
+    const lon1 = (x / n) * 360 - 180;
+    const lon2 = ((x + 1) / n) * 360 - 180;
+
+    const latRad1 = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n)));
+    const latRad2 = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 1) / n)));
+
+    const lat1 = (latRad1 * 180) / Math.PI;
+    const lat2 = (latRad2 * 180) / Math.PI;
+
+    return [[Math.min(lat1, lat2), lon1], [Math.max(lat1, lat2), lon2]];
+  }
+
+  function getRatioColor(ratio, totalEligible) {
+    if (totalEligible === 0) {
+      return { fill: 'transparent', fillOpacity: 0.0, stroke: 'rgba(148, 163, 184, 0.2)' };
+    }
+
+    let r, g, b;
+    if (ratio < 0.25) {
+      r = 239; g = 68; b = 68;
+    } else if (ratio < 0.5) {
+      r = 245; g = 158; b = 11;
+    } else if (ratio < 0.75) {
+      r = 132; g = 204; b = 22;
+    } else {
+      r = 16; g = 185; b = 129;
+    }
+
+    return {
+      fill: `rgb(${r}, ${g}, ${b})`,
+      fillOpacity: 0.18 + ratio * 0.15,
+      stroke: `rgba(${r}, ${g}, ${b}, 0.5)`
+    };
   }
 
   async function initMap() {
@@ -348,51 +395,6 @@
     }
   }
 
-  function latLngToTile(lat, lng, zoom) {
-    const latRad = (lat * Math.PI) / 180;
-    const n = Math.pow(2, zoom);
-    const x = Math.floor(((lng + 180) / 360) * n);
-    const y = Math.floor((1 - Math.asinh(Math.tan(latRad)) / Math.PI) / 2 * n);
-    return { x, y };
-  }
-
-  function tileToLatLngBounds(x, y, zoom) {
-    const n = Math.pow(2, zoom);
-    const lon1 = (x / n) * 360 - 180;
-    const lon2 = ((x + 1) / n) * 360 - 180;
-
-    const latRad1 = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n)));
-    const latRad2 = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 1) / n)));
-
-    const lat1 = (latRad1 * 180) / Math.PI;
-    const lat2 = (latRad2 * 180) / Math.PI;
-
-    return [[Math.min(lat1, lat2), lon1], [Math.max(lat1, lat2), lon2]];
-  }
-
-  function getRatioColor(ratio, totalEligible) {
-    if (totalEligible === 0) {
-      return { fill: 'transparent', fillOpacity: 0.0, stroke: 'rgba(148, 163, 184, 0.2)' };
-    }
-
-    let r, g, b;
-    if (ratio < 0.25) {
-      r = 239; g = 68; b = 68;
-    } else if (ratio < 0.5) {
-      r = 245; g = 158; b = 11;
-    } else if (ratio < 0.75) {
-      r = 132; g = 204; b = 22;
-    } else {
-      r = 16; g = 185; b = 129;
-    }
-
-    return {
-      fill: `rgb(${r}, ${g}, ${b})`,
-      fillOpacity: 0.18 + ratio * 0.15,
-      stroke: `rgba(${r}, ${g}, ${b}, 0.5)`
-    };
-  }
-
   function renderFixedGridHeatmap() {
     gridLayer.clearLayers();
 
@@ -473,7 +475,6 @@
     }
   }
 
-  // Zoom 19 到達時: 該当する Zoom 10 ブロック JSON を非同期取得してピン描画
   async function renderBlockMarkers() {
     const bounds = map.getBounds();
     const nw = latLngToTile(bounds.getNorth(), bounds.getWest(), BLOCK_ZOOM);
