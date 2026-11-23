@@ -82,6 +82,7 @@ class RegionalTileHandler(osmium.SimpleHandler):
         if not is_target:
             return
 
+        # ノード自身の座標を取得（Nodeレコード自身に含まれるためキャッシュ不要）
         try:
             loc = n.location
             if not loc.valid():
@@ -138,9 +139,9 @@ def main():
         size_mb = os.path.getsize(pbf) / (1024 * 1024)
         print(f"Reading: {pbf} ({size_mb:.1f} MB) ...")
         t0 = time.time()
-        
-        # locations=True, idx="flex_mem" でメモリを節約しつつ単体ノードの座標を確実に解決
-        handler.apply_file(pbf, locations=True, idx="flex_mem")
+
+        # 標準呼び出し（Node単体処理のため locations キャッシュは一切不要）
+        handler.apply_file(pbf)
         print(f"Finished {pbf} in {time.time() - t0:.1f}s")
 
     print(f"All files processed in {time.time() - total_start:.1f}s.")
