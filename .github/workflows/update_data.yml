@@ -1,35 +1,27 @@
-name: Update Regional Barrier Data (Weekly Cycle)
+name: Update Nationwide Barrier Data (Weekly)
 
 on:
   schedule:
-    # 毎日 日本時間 午前3時 (UTC 18:00) に実行
-    - cron: '0 18 * * *'
+    # 毎週日曜日 午前3時 JST (土曜日 18:00 UTC)
+    - cron: '0 18 * * 6'
   workflow_dispatch:
-    inputs:
-      region:
-        description: '対象地域を選択 (手動実行)'
-        required: true
-        default: 'auto'
-        type: choice
-        options:
-          - auto
-          - kyushu
-          - chugoku_shikoku
-          - kansai
-          - chubu
-          - kanto
-          - tohoku
-          - hokkaido
 
 permissions:
   contents: write
 
 jobs:
-  update-regional-data:
+  update-nationwide-data:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
 
     steps:
+      - name: Maximize disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          df -h
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -42,49 +34,21 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install osmium requests
+          pip install osmium
 
-      - name: Determine target region
-        id: select-region
+      - name: Download Japan OSM PBF
         run: |
-          DAY_OF_WEEK=$(date -u +%u)
-          MANUAL_INPUT="${{ github.event.inputs.region }}"
+          echo "Downloading japan-latest.osm.pbf from Geofabrik..."
+          curl -L -f -o japan-latest.osm.pbf https://download.geofabrik.de/asia/japan-latest.osm.pbf
+          ls -lh japan-latest.osm.pbf
 
-          if [ -n "$MANUAL_INPUT" ] && [ "$MANUAL_INPUT" != "auto" ]; then
-            TARGET="$MANUAL_INPUT"
-          else
-            case $DAY_OF_WEEK in
-              1) TARGET="kyushu" ;;          # 月曜: 九州・沖縄
-              2) TARGET="chugoku_shikoku" ;; # 火曜: 中国・四国
-              3) TARGET="kansai" ;;          # 水曜: 関西
-              4) TARGET="chubu" ;;           # 木曜: 中部
-              5) TARGET="kanto" ;;           # 金曜: 関東
-              6) TARGET="tohoku" ;;          # 土曜: 東北
-              7) TARGET="hokkaido" ;;        # 日曜: 北海道
-            esac
-          fi
-          echo "target_region=$TARGET" >> $GITHUB_OUTPUT
-          echo "Selected region: $TARGET"
-
-      - name: Download Regional PBF
+      - name: Run Aggregator
         run: |
-          TARGET="${{ steps.select-region.outputs.target_region }}"
-          mkdir -p pbf_input
+          python scripts/aggregate_pbf.py japan-latest.osm.pbf
 
-          if [ "$TARGET" = "chugoku_shikoku" ]; then
-            curl -L -f -o pbf_input/chugoku.osm.pbf https://download.geofabrik.de/asia/japan/chugoku-latest.osm.pbf
-            curl -L -f -o pbf_input/shikoku.osm.pbf https://download.geofabrik.de/asia/japan/shikoku-latest.osm.pbf
-          else
-            curl -L -f -o "pbf_input/${TARGET}.osm.pbf" "https://download.geofabrik.de/asia/japan/${TARGET}-latest.osm.pbf"
-          fi
-
-      - name: Run Aggregator and Merge
+      - name: Clean up PBF file
         run: |
-          python scripts/aggregate_pbf.py pbf_input
-
-      - name: Clean up temporary files
-        run: |
-          rm -rf pbf_input
+          rm -f japan-latest.osm.pbf
 
       - name: Commit and push changes
         run: |
@@ -94,6 +58,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Update barrier data: ${{ steps.select-region.outputs.target_region }} [skip ci]"
+            git commit -m "Update nationwide barrier data [skip ci]"
             git push origin HEAD:${{ github.ref_name }}
           fi
