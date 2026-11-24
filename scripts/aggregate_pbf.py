@@ -64,13 +64,13 @@ class NationwideTileHandler(osmium.SimpleHandler):
     def node(self, n):
         self.processed += 1
 
-        # タグが 0 個のノード（OSMノードの大半）は最速で除外
+        # タグが 0 個のノード（OSMノードの大半）は最速でスキップ
         if not n.tags:
             return
 
         tags = n.tags
 
-        # 対象地物かどうかの判定
+        # 対象地物クイック判定
         is_target = False
         if "barrier" in tags and tags["barrier"] == "kerb":
             is_target = True
@@ -86,6 +86,7 @@ class NationwideTileHandler(osmium.SimpleHandler):
         if not is_target:
             return
 
+        # ノード自身の座標を取得（Nodeレコード自身に含まれるため追加キャッシュ不要）
         try:
             loc = n.location
             if not loc.valid():
@@ -135,13 +136,15 @@ def main():
     blocks_dir = os.path.join(data_dir, "blocks")
 
     size_mb = os.path.getsize(pbf_file) / (1024 * 1024)
+    print(f"Pyosmium version: {getattr(osmium, '__version__', 'unknown')}")
     print(f"Start processing nationwide file: {pbf_file} ({size_mb:.1f} MB)...")
     start_time = time.time()
 
     handler = NationwideTileHandler()
     
-    # sparse_mem_array を指定し、必要なノード座標のみを最小限のメモリでキャッシュ
-    handler.apply_file(pbf_file, locations=True, idx="sparse_mem_array")
+    # locations や idx の余計なオプションを一切渡さず標準ストリーミング実行
+    # （Node単体の座標は PBF レコード自身から直接取得され、メモリキャッシュは作成されない）
+    handler.apply_file(pbf_file)
 
     elapsed = time.time() - start_time
     print(f"Finished parsing in {elapsed:.1f}s.")
