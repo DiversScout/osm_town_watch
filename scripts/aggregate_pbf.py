@@ -8,6 +8,18 @@ import osmium
 TILE_BASE_ZOOM = 16
 BLOCK_ZOOM = 10  # 約40km四方で地物を集約
 
+# 移動困難者にとって目的地となり得る屋内滞在型 amenity
+TARGET_AMENITIES = {
+    # 飲食
+    "restaurant", "cafe", "fast_food", "food_court", "bar", "pub",
+    # 医療・福祉
+    "hospital", "clinic", "pharmacy", "dentist", "social_facility",
+    # 公共・行政・金融
+    "townhall", "community_centre", "library", "post_office", "bank",
+    # 文化・集客
+    "cinema", "theatre", "museum", "place_of_worship"
+}
+
 def lat_lng_to_tile(lat, lng, zoom):
     lat_rad = math.radians(lat)
     n = 2.0 ** zoom
@@ -15,8 +27,8 @@ def lat_lng_to_tile(lat, lng, zoom):
     y = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
     return x, y
 
-def evaluate_feature(tags):
-    # 縁石 (kerb)
+def evaluate_mobility_feature(tags):
+    # 1. 縁石・段差 (kerb)
     if tags.get("barrier") == "kerb" or "kerb" in tags:
         k = tags.get("kerb", "")
         if k in ("flush", "lowered"):
@@ -25,38 +37,84 @@ def evaluate_feature(tags):
             return "kerb", 1, "blocked", "段差あり縁石 (raised)"
         elif k and k != "unknown":
             return "kerb", 1, "limited", f"縁石 ({k})"
-        return "kerb", 0, "unknown", "縁石 (段差未記録)"
+        return "kerb", 0, "unknown", "縁石 (段差未記録・要調査)"
 
-    # エレベーター
+    # 2. 垂直移動・スロープ (elevator / ramp)
     if tags.get("highway") == "elevator":
-        return "elevator", 1, "passable", "エレベーター"
+        w = tags.get("wheelchair", "yes")
+        p = "blocked" if w == "no" else "passable"
+        return "elevator", 1, p, "エレベーター"
 
-    # 車椅子対応トイレ
-    if tags.get("toilets:wheelchair") in ("yes", "limited", "no"):
-        val = tags.get("toilets:wheelchair")
-        p = "passable" if val == "yes" else ("limited" if val == "limited" else "blocked")
-        return "toilet", 1, p, "車椅子対応トイレ"
+    if tags.get("highway") == "ramp" or "ramp" in tags or "ramp:wheelchair" in tags:
+        rw = tags.get("ramp:wheelchair") or tags.get("wheelchair")
+        p = "passable" if rw in ("yes", "designated") else ("limited" if rw == "limited" else "passable")
+        return "ramp", 1, p, "スロープ (傾斜路)"
 
-    # 車椅子対応施設
-    if tags.get("wheelchair"):
-        w = tags.get("wheelchair")
-        p = "passable" if w == "yes" else ("limited" if w == "limited" else "blocked")
-        name = tags.get("name", "施設")
-        return "poi", 1, p, f"{name} (車椅子:{w})"
-
-    # 横断歩道
+    # 3. 横断歩道 (crossing)
     if tags.get("highway") == "crossing":
-        return "crossing", 0, "unknown", "横断歩道 (未登録)"
+        k = tags.get("kerb", "")
+        tp = tags.get("tactile_paving", "")
+        has_info = bool(k or tp)
+        p = "passable" if k in ("flush", "lowered") else ("blocked" if k == "raised" else "unknown")
+        desc = "横断歩道" + (f" ({k})" if k else "") + (" [点字ブロック]" if tp == "yes" else "")
+        return "crossing", (1 if has_info else 0), p, desc
 
-    # 一般店舗・施設
-    name = tags.get("name", "施設/店舗")
-    return "poi", 0, "unknown", f"{name} (未登録)"
+    # 4. 点字ブロック単独ノード (tactile_paving)
+    if tags.get("tactile_paving") in ("yes", "incorrect"):
+        val = tags.get("tactile_paving")
+        p = "passable" if val == "yes" else "limited"
+        return "tactile_paving", 1, p, f"点字ブロック (視覚誘導:{val})"
 
-class FilteredBarrierHandler(osmium.SimpleHandler):
+    # 5. トイレ (toilets)
+    if tags.get("amenity") == "toilets" or "toilets:wheelchair" in tags:
+        tw = tags.get("toilets:wheelchair") or tags.get("wheelchair")
+        if tw == "yes":
+            return "toilet", 1, "passable", "多機能・車椅子対応トイレ"
+        elif tw == "limited":
+            return "toilet", 1, "limited", "車椅子利用可トイレ (要介助)"
+        elif tw == "no":
+            return "toilet", 1, "blocked", "車椅子非対応トイレ"
+        return "toilet", 0, "unknown", "公衆トイレ (対応状況未調査)"
+
+    # 6. 交通拠点 (station)
+    if tags.get("railway") in ("station", "subway_entrance", "halt"):
+        w = tags.get("wheelchair")
+        name = tags.get("name", "駅出入口")
+        if w in ("yes", "designated"):
+            return "station", 1, "passable", f"{name} (車椅子対応)"
+        elif w == "limited":
+            return "station", 1, "limited", f"{name} (要介助)"
+        elif w == "no":
+            return "station", 1, "blocked", f"{name} (非対応)"
+        return "station", 0, "unknown", f"{name} (対応状況未調査)"
+
+    # 7. 目的地としての店舗・滞在施設 (shop / amenity)
+    is_shop = "shop" in tags
+    amenity_val = tags.get("amenity")
+    is_target_amenity = amenity_val in TARGET_AMENITIES
+
+    if is_shop or is_target_amenity:
+        w = tags.get("wheelchair")
+        name = tags.get("name") or (f"店舗 ({tags.get('shop')})" if is_shop else f"施設 ({amenity_val})")
+        
+        if w in ("yes", "designated"):
+            return "shop" if is_shop else "poi", 1, "passable", f"{name} (車椅子可)"
+        elif w == "limited":
+            return "shop" if is_shop else "poi", 1, "limited", f"{name} (車椅子要介助)"
+        elif w == "no":
+            return "shop" if is_shop else "poi", 1, "blocked", f"{name} (車椅子不可)"
+        
+        # 未調査の店舗・施設は「要マッピング対象」として追跡
+        return "shop" if is_shop else "poi", 0, "unknown", f"{name} (車椅子利用未調査)"
+
+    # ポスト、ベンチ、自販機、街灯などはすべて None で除外
+    return None
+
+class MobilityBarrierHandler(osmium.SimpleHandler):
     def __init__(self):
         super().__init__()
-        self.tile_stats = {}      # { "x_y": [total, tagged] }
-        self.block_features = {}  # { "bx_by": [ [id, lat, lon, type, reg, pass, desc], ... ] }
+        self.tile_stats = {}
+        self.block_features = {}
         self.processed = 0
         self.matched = 0
 
@@ -64,6 +122,10 @@ class FilteredBarrierHandler(osmium.SimpleHandler):
         self.processed += 1
         tags = n.tags
         if not tags:
+            return
+
+        eval_result = evaluate_mobility_feature(tags)
+        if not eval_result:
             return
 
         try:
@@ -76,7 +138,7 @@ class FilteredBarrierHandler(osmium.SimpleHandler):
             return
 
         self.matched += 1
-        feat_type, reg, pass_status, desc = evaluate_feature(tags)
+        feat_type, reg, pass_status, desc = eval_result
 
         # 1. Zoom 16 タイル統計
         x, y = lat_lng_to_tile(lat, lon, TILE_BASE_ZOOM)
@@ -115,13 +177,12 @@ def main():
     print(f"Processing pre-filtered file: {pbf_file} ({size_mb:.1f} MB)...")
     start_time = time.time()
 
-    handler = FilteredBarrierHandler()
-    # 抽出済みで軽量なため、locations=True で確実に座標を解決
+    handler = MobilityBarrierHandler()
     handler.apply_file(pbf_file, locations=True)
 
     elapsed = time.time() - start_time
     print(f"Finished in {elapsed:.1f}s.")
-    print(f"Processed: {handler.processed:,} nodes. Matched: {handler.matched:,} features.")
+    print(f"Processed: {handler.processed:,} nodes. Matched: {handler.matched:,} mobility features.")
     print(f"Summary: {len(handler.tile_stats):,} Zoom 16 tiles, {len(handler.block_features):,} Zoom 10 blocks.")
 
     os.makedirs(data_dir, exist_ok=True)
