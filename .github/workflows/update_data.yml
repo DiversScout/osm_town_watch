@@ -15,17 +15,25 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Maximize disk space and enable swap
+      - name: Free disk space aggressively
         run: |
+          echo "=== Disk space before cleanup ==="
+          df -h
+          
+          # 不要な巨大ツール群を削除して 25GB 以上の空きを確保
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
-          # 4GB スワップを作成してメモリ不足(OOM Killed)を防止
-          sudo fallocate -l 4G /swapfile
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+          
+          # スワップ領域を 2GB に設定（ディスク圧迫を防止しつつOOM対策）
+          sudo fallocate -l 2G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
-          free -h
+          
+          echo "=== Disk space after cleanup ==="
           df -h
 
       - name: Checkout repository
@@ -48,6 +56,7 @@ jobs:
           echo "Downloading japan-latest.osm.pbf from Geofabrik..."
           curl -L -f -o japan-latest.osm.pbf https://download.geofabrik.de/asia/japan-latest.osm.pbf
           ls -lh japan-latest.osm.pbf
+          df -h
 
       - name: Run Aggregator
         run: |
@@ -56,6 +65,7 @@ jobs:
       - name: Clean up PBF file
         run: |
           rm -f japan-latest.osm.pbf
+          df -h
 
       - name: Verify generated data
         run: |
