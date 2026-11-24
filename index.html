@@ -524,12 +524,17 @@
     else if (passStatus === 'limited') colorClass = 'color-limited';
     else if (passStatus === 'blocked') colorClass = 'color-blocked';
 
+    // 移動困難者向けアイコン記号の割り当て
     let iconChar = '♿';
-    if (type === 'kerb') iconChar = '⤓';
-    else if (type === 'elevator') iconChar = '🛗';
-    else if (type === 'toilet') iconChar = '🚻';
-    else if (type === 'crossing') iconChar = '🚶';
-    else if (reg === 0) iconChar = '❓';
+    if (type === 'kerb') iconChar = '⤓';           // 縁石・段差
+    else if (type === 'elevator') iconChar = '🛗';  // エレベーター
+    else if (type === 'ramp') iconChar = '📐';      // スロープ
+    else if (type === 'toilet') iconChar = '🚻';    // 多機能トイレ
+    else if (type === 'crossing') iconChar = '🚶';  // 横断歩道
+    else if (type === 'station') iconChar = '🚉';   // 駅・交通拠点
+    else if (type === 'shop') iconChar = '🛍️';      // 店舗 (買い物)
+    else if (type === 'poi') iconChar = '🏛️';       // 公共施設・飲食等
+    else if (type === 'tactile_paving') iconChar = '⠿'; // 点字ブロック
 
     const icon = L.divIcon({
       className: `poi-icon ${shapeClass} ${colorClass}`,
@@ -540,7 +545,7 @@
     });
 
     const marker = L.marker([lat, lon], { icon });
-    const statusText = (reg === 1) ? '【登録済み】' : '【未登録・要調査】';
+    const statusText = (reg === 1) ? '【登録済み】' : '【未調査・要マッピング】';
     const statusColor = (passStatus === 'passable') ? '#16a34a' : ((passStatus === 'blocked') ? '#dc2626' : '#b45309');
 
     const popup = `
