@@ -41,15 +41,22 @@ jobs:
           curl -L -f -o japan-latest.osm.pbf https://download.geofabrik.de/asia/japan-latest.osm.pbf
           ls -lh japan-latest.osm.pbf
 
-      - name: Filter Barrier Features (Ultra fast C++ filtering)
+      - name: Filter Barrier Features (Mobility specific)
         run: |
-          echo "Filtering target barrier nodes..."
-          # 対象タグを持つノードのみを高速抽出 (2.2GB -> 数十MBに圧縮)
+          echo "Filtering target mobility barrier nodes..."
+          # 移動困難者向け設備・目的地(店舗・公共施設)に限定して事前抽出
           osmium tags-filter japan-latest.osm.pbf \
             n/barrier=kerb n/kerb \
-            n/highway=elevator n/highway=crossing \
+            n/highway=elevator n/highway=crossing n/highway=ramp n/ramp n/ramp:wheelchair \
             n/wheelchair n/toilets:wheelchair \
-            n/amenity n/shop \
+            n/tactile_paving=yes \
+            n/amenity=toilets \
+            n/railway=station n/railway=subway_entrance n/railway=halt \
+            n/shop \
+            n/amenity=restaurant n/amenity=cafe n/amenity=fast_food n/amenity=food_court n/amenity=bar n/amenity=pub \
+            n/amenity=hospital n/amenity=clinic n/amenity=pharmacy n/amenity=dentist \
+            n/amenity=townhall n/amenity=community_centre n/amenity=library n/amenity=post_office n/amenity=bank \
+            n/amenity=cinema n/amenity=theatre n/amenity=museum \
             -o filtered_barriers.osm.pbf --overwrite
           
           rm -f japan-latest.osm.pbf
@@ -73,6 +80,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No data changes detected."
           else
-            git commit -m "Update nationwide barrier data [skip ci]"
+            git commit -m "Update nationwide barrier data (mobility focused) [skip ci]"
             git push origin HEAD:${{ github.ref_name }}
           fi
