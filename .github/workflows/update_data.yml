@@ -12,28 +12,14 @@ permissions:
 jobs:
   update-nationwide-data:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 40
 
     steps:
-      - name: Free disk space aggressively
+      - name: Free disk space
         run: |
-          echo "=== Disk space before cleanup ==="
-          df -h
-          
-          # 不要な巨大ツール群を削除して 25GB 以上の空きを確保
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force || true
-          
-          # スワップ領域を 2GB に設定（ディスク圧迫を防止しつつOOM対策）
-          sudo fallocate -l 2G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          
-          echo "=== Disk space after cleanup ==="
           df -h
 
       - name: Checkout repository
@@ -42,13 +28,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
+      - name: Set up Python and Osmium Tool
         run: |
+          sudo apt-get update
+          sudo apt-get install -y osmium-tool
+          python3 -m pip install --upgrade pip
           pip install osmium
 
       - name: Download Japan OSM PBF
@@ -56,16 +40,25 @@ jobs:
           echo "Downloading japan-latest.osm.pbf from Geofabrik..."
           curl -L -f -o japan-latest.osm.pbf https://download.geofabrik.de/asia/japan-latest.osm.pbf
           ls -lh japan-latest.osm.pbf
-          df -h
+
+      - name: Filter Barrier Features (Ultra fast C++ filtering)
+        run: |
+          echo "Filtering target barrier nodes..."
+          # 対象タグを持つノードのみを高速抽出 (2.2GB -> 数十MBに圧縮)
+          osmium tags-filter japan-latest.osm.pbf \
+            n/barrier=kerb n/kerb \
+            n/highway=elevator n/highway=crossing \
+            n/wheelchair n/toilets:wheelchair \
+            n/amenity n/shop \
+            -o filtered_barriers.osm.pbf --overwrite
+          
+          rm -f japan-latest.osm.pbf
+          ls -lh filtered_barriers.osm.pbf
 
       - name: Run Aggregator
         run: |
-          python scripts/aggregate_pbf.py japan-latest.osm.pbf
-
-      - name: Clean up PBF file
-        run: |
-          rm -f japan-latest.osm.pbf
-          df -h
+          python scripts/aggregate_pbf.py filtered_barriers.osm.pbf
+          rm -f filtered_barriers.osm.pbf
 
       - name: Verify generated data
         run: |
