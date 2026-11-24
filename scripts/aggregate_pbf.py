@@ -122,7 +122,6 @@ def main():
         print(f"Error: File not found: {pbf_file}")
         sys.exit(1)
 
-    # リポジトリルート基準の絶対パス取得
     script_dir = os.path.dirname(os.path.abspath(__file__))
     repo_root = os.path.dirname(script_dir)
     data_dir = os.path.join(repo_root, "data")
@@ -133,14 +132,14 @@ def main():
     start_time = time.time()
 
     handler = NationwideTileHandler()
-    handler.apply_file(pbf_file, locations=True)
+    # locations=True を指定せず直接 Node 座標を参照
+    handler.apply_file(pbf_file)
 
     elapsed = time.time() - start_time
     print(f"Processed {handler.processed:,} nodes in {elapsed:.1f}s.")
     print(f"Matched {handler.matched:,} barrier features across {len(handler.tile_stats):,} Zoom 16 tiles.")
     print(f"Distributed across {len(handler.block_features):,} Zoom 10 blocks.")
 
-    # 出力先ディレクトリの準備
     os.makedirs(data_dir, exist_ok=True)
     os.makedirs(blocks_dir, exist_ok=True)
 
