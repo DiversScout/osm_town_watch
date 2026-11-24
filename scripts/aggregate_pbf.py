@@ -1,7 +1,6 @@
 import json
 import math
 import os
-import shutil
 import sys
 import time
 import osmium
@@ -53,7 +52,7 @@ def evaluate_feature(tags):
     name = tags.get("name", "施設/店舗")
     return "poi", 0, "unknown", f"{name} (未登録)"
 
-class NationwideTileHandler(osmium.SimpleHandler):
+class FilteredBarrierHandler(osmium.SimpleHandler):
     def __init__(self):
         super().__init__()
         self.tile_stats = {}      # { "x_y": [total, tagged] }
@@ -63,30 +62,10 @@ class NationwideTileHandler(osmium.SimpleHandler):
 
     def node(self, n):
         self.processed += 1
-
-        # タグが 0 個のノード（OSMノードの大半）は最速でスキップ
-        if not n.tags:
-            return
-
         tags = n.tags
-
-        # 対象地物クイック判定
-        is_target = False
-        if "barrier" in tags and tags["barrier"] == "kerb":
-            is_target = True
-        elif "kerb" in tags:
-            is_target = True
-        elif tags.get("highway") in ("crossing", "elevator"):
-            is_target = True
-        elif "shop" in tags or "amenity" in tags:
-            is_target = True
-        elif "wheelchair" in tags or "toilets:wheelchair" in tags:
-            is_target = True
-
-        if not is_target:
+        if not tags:
             return
 
-        # ノード自身の座標を取得（Nodeレコード自身に含まれるため追加キャッシュ不要）
         try:
             loc = n.location
             if not loc.valid():
@@ -108,7 +87,7 @@ class NationwideTileHandler(osmium.SimpleHandler):
         if reg == 1:
             self.tile_stats[key][1] += 1
 
-        # 2. Zoom 10 ブロック別個別地物
+        # 2. Zoom 10 ブロック別地物
         bx, by = lat_lng_to_tile(lat, lon, BLOCK_ZOOM)
         bkey = f"{bx}_{by}"
         if bkey not in self.block_features:
@@ -116,9 +95,6 @@ class NationwideTileHandler(osmium.SimpleHandler):
         self.block_features[bkey].append([
             n.id, lat, lon, feat_type, reg, pass_status, desc
         ])
-
-        if self.matched % 200000 == 0:
-            print(f"Matched {self.matched:,} features (processed {self.processed:,} nodes)...")
 
 def main():
     if len(sys.argv) < 2:
@@ -136,22 +112,18 @@ def main():
     blocks_dir = os.path.join(data_dir, "blocks")
 
     size_mb = os.path.getsize(pbf_file) / (1024 * 1024)
-    print(f"Pyosmium version: {getattr(osmium, '__version__', 'unknown')}")
-    print(f"Start processing nationwide file: {pbf_file} ({size_mb:.1f} MB)...")
+    print(f"Processing pre-filtered file: {pbf_file} ({size_mb:.1f} MB)...")
     start_time = time.time()
 
-    handler = NationwideTileHandler()
-    
-    # locations や idx の余計なオプションを一切渡さず標準ストリーミング実行
-    # （Node単体の座標は PBF レコード自身から直接取得され、メモリキャッシュは作成されない）
-    handler.apply_file(pbf_file)
+    handler = FilteredBarrierHandler()
+    # 抽出済みで軽量なため、locations=True で確実に座標を解決
+    handler.apply_file(pbf_file, locations=True)
 
     elapsed = time.time() - start_time
-    print(f"Finished parsing in {elapsed:.1f}s.")
-    print(f"Total processed: {handler.processed:,} nodes.")
-    print(f"Matched features: {handler.matched:,} across {len(handler.tile_stats):,} tiles and {len(handler.block_features):,} blocks.")
+    print(f"Finished in {elapsed:.1f}s.")
+    print(f"Processed: {handler.processed:,} nodes. Matched: {handler.matched:,} features.")
+    print(f"Summary: {len(handler.tile_stats):,} Zoom 16 tiles, {len(handler.block_features):,} Zoom 10 blocks.")
 
-    # 出力先ディレクトリの準備
     os.makedirs(data_dir, exist_ok=True)
     os.makedirs(blocks_dir, exist_ok=True)
 
@@ -179,8 +151,8 @@ def main():
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary_payload, f, separators=(',', ':'))
 
-    print(f"Saved nationwide summary: {summary_path} ({len(summary_tiles):,} tiles, {os.path.getsize(summary_path)/(1024*1024):.2f} MB)")
-    print("Nationwide build completed successfully.")
+    print(f"Saved nationwide summary: {summary_path} ({len(summary_tiles):,} tiles)")
+    print("Build completed successfully.")
 
 if __name__ == "__main__":
     main()
