@@ -15,11 +15,17 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Maximize disk space
+      - name: Maximize disk space and enable swap
         run: |
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
+          # 4GB スワップを作成してメモリ不足(OOM Killed)を防止
+          sudo fallocate -l 4G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
           df -h
 
       - name: Checkout repository
@@ -54,7 +60,6 @@ jobs:
       - name: Verify generated data
         run: |
           ls -lh data/
-          ls -lh data/blocks/ | head -n 20
           echo "Total block files: $(ls -1 data/blocks/*.json 2>/dev/null | wc -l)"
 
       - name: Commit and push changes
