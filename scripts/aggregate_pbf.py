@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import shutil
 import sys
 import time
 import osmium
@@ -52,6 +53,72 @@ def evaluate_feature(tags):
     name = tags.get("name", "施設/店舗")
     return "poi", 0, "unknown", f"{name} (未登録)"
 
+class NationwideTileHandler(osmium.SimpleHandler):
+    def __init__(self):
+        super().__init__()
+        self.tile_stats = {}      # { "x_y": [total, tagged] }
+        self.block_features = {}  # { "bx_by": [ [id, lat, lon, type, reg, pass, desc], ... ] }
+        self.processed = 0
+        self.matched = 0
+
+    def node(self, n):
+        self.processed += 1
+
+        # タグが 0 個のノード（OSMノードの大半）は最速で除外
+        if not n.tags:
+            return
+
+        tags = n.tags
+
+        # 対象地物かどうかの判定
+        is_target = False
+        if "barrier" in tags and tags["barrier"] == "kerb":
+            is_target = True
+        elif "kerb" in tags:
+            is_target = True
+        elif tags.get("highway") in ("crossing", "elevator"):
+            is_target = True
+        elif "shop" in tags or "amenity" in tags:
+            is_target = True
+        elif "wheelchair" in tags or "toilets:wheelchair" in tags:
+            is_target = True
+
+        if not is_target:
+            return
+
+        try:
+            loc = n.location
+            if not loc.valid():
+                return
+            lat = round(loc.lat, 6)
+            lon = round(loc.lon, 6)
+        except Exception:
+            return
+
+        self.matched += 1
+        feat_type, reg, pass_status, desc = evaluate_feature(tags)
+
+        # 1. Zoom 16 タイル統計
+        x, y = lat_lng_to_tile(lat, lon, TILE_BASE_ZOOM)
+        key = f"{x}_{y}"
+        if key not in self.tile_stats:
+            self.tile_stats[key] = [0, 0]
+        self.tile_stats[key][0] += 1
+        if reg == 1:
+            self.tile_stats[key][1] += 1
+
+        # 2. Zoom 10 ブロック別個別地物
+        bx, by = lat_lng_to_tile(lat, lon, BLOCK_ZOOM)
+        bkey = f"{bx}_{by}"
+        if bkey not in self.block_features:
+            self.block_features[bkey] = []
+        self.block_features[bkey].append([
+            n.id, lat, lon, feat_type, reg, pass_status, desc
+        ])
+
+        if self.matched % 200000 == 0:
+            print(f"Matched {self.matched:,} features (processed {self.processed:,} nodes)...")
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: python aggregate_pbf.py <pbf_file>")
@@ -71,81 +138,15 @@ def main():
     print(f"Start processing nationwide file: {pbf_file} ({size_mb:.1f} MB)...")
     start_time = time.time()
 
-    tile_stats = {}      # { "x_y": [total, tagged] }
-    block_features = {}  # { "bx_by": [ [id, lat, lon, type, reg, pass, desc], ... ] }
-
-    processed = 0
-    matched = 0
-
-    # osmium.io.Reader で Node のみをダイレクトにストリーム読み込み
-    reader = osmium.io.Reader(pbf_file, osmium.osm.osm_entity_bits.NODE)
-
-    while not reader.eof():
-        ob = reader.read()
-        if not ob:
-            break
-
-        processed += 1
-
-        # タグ辞書を取得
-        tags = {t.k: t.v for t in ob.tags}
-        if not tags:
-            continue
-
-        # 対象地物クイック判定
-        is_target = False
-        if tags.get("barrier") == "kerb" or "kerb" in tags:
-            is_target = True
-        elif tags.get("highway") in ("crossing", "elevator"):
-            is_target = True
-        elif "shop" in tags or "amenity" in tags:
-            is_target = True
-        elif "wheelchair" in tags or "toilets:wheelchair" in tags:
-            is_target = True
-
-        if not is_target:
-            continue
-
-        # 座標の取得 (Reader直下の Node は位置情報を保持している)
-        try:
-            loc = ob.location
-            if not loc.valid():
-                continue
-            lat = round(loc.lat, 6)
-            lon = round(loc.lon, 6)
-        except Exception:
-            continue
-
-        matched += 1
-        feat_type, reg, pass_status, desc = evaluate_feature(tags)
-
-        # 1. Zoom 16 タイル統計
-        x, y = lat_lng_to_tile(lat, lon, TILE_BASE_ZOOM)
-        key = f"{x}_{y}"
-        if key not in tile_stats:
-            tile_stats[key] = [0, 0]
-        tile_stats[key][0] += 1
-        if reg == 1:
-            tile_stats[key][1] += 1
-
-        # 2. Zoom 10 ブロック別地物
-        bx, by = lat_lng_to_tile(lat, lon, BLOCK_ZOOM)
-        bkey = f"{bx}_{by}"
-        if bkey not in block_features:
-            block_features[bkey] = []
-        block_features[bkey].append([
-            ob.id, lat, lon, feat_type, reg, pass_status, desc
-        ])
-
-        if matched % 200000 == 0:
-            print(f"Matched {matched:,} features (processed {processed:,} nodes)...")
-
-    reader.close()
+    handler = NationwideTileHandler()
+    
+    # sparse_mem_array を指定し、必要なノード座標のみを最小限のメモリでキャッシュ
+    handler.apply_file(pbf_file, locations=True, idx="sparse_mem_array")
 
     elapsed = time.time() - start_time
     print(f"Finished parsing in {elapsed:.1f}s.")
-    print(f"Total processed: {processed:,} nodes.")
-    print(f"Matched features: {matched:,} across {len(tile_stats):,} tiles and {len(block_features):,} blocks.")
+    print(f"Total processed: {handler.processed:,} nodes.")
+    print(f"Matched features: {handler.matched:,} across {len(handler.tile_stats):,} tiles and {len(handler.block_features):,} blocks.")
 
     # 出力先ディレクトリの準備
     os.makedirs(data_dir, exist_ok=True)
@@ -153,7 +154,7 @@ def main():
 
     # 1. Zoom 10 ブロック別地物の書き出し
     print("Writing Zoom 10 block files...")
-    for bkey, feats in block_features.items():
+    for bkey, feats in handler.block_features.items():
         block_file = os.path.join(blocks_dir, f"{bkey}.json")
         with open(block_file, "w", encoding="utf-8") as f:
             json.dump(feats, f, separators=(',', ':'))
@@ -161,7 +162,7 @@ def main():
     # 2. 全国サマリー (data/tiles.json) の書き出し
     summary_tiles = {
         k: {"total": v[0], "tagged": v[1]}
-        for k, v in tile_stats.items()
+        for k, v in handler.tile_stats.items()
     }
 
     summary_payload = {
